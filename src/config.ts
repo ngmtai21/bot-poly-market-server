@@ -14,4 +14,7 @@ export const config = {
   clobApiPassphrase: process.env.CLOB_API_PASSPHRASE ?? "",
   minProfitMargin: Number(process.env.MIN_PROFIT_MARGIN ?? "0.01"),
   maxOrderSizeUsdc: Number(process.env.MAX_ORDER_SIZE_USDC ?? "50"),
+  // Safety gate: orders are only ever placed when this is exactly "true".
+  // Defaults to dry-run so a fresh checkout never trades by accident.
+  enableTrading: process.env.ENABLE_TRADING === "true",
 };

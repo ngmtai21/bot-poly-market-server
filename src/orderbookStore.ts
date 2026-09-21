@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { logger } from "./logger.js";
 
 export interface BookLevel {
   price: number;
@@ -8,6 +9,7 @@ export interface BookLevel {
 export interface Book {
   bids: BookLevel[];
   asks: BookLevel[];
+  minOrderSize: number;
 }
 
 const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -34,6 +36,10 @@ export class OrderbookStore {
     return bestAsk(this.books.get(tokenId));
   }
 
+  getBook(tokenId: string): Book | undefined {
+    return this.books.get(tokenId);
+  }
+
   connect(): void {
     this.ws = new WebSocket(WS_URL);
 
@@ -53,7 +59,7 @@ export class OrderbookStore {
     });
 
     this.ws.on("error", (err) => {
-      console.error("Orderbook WS error:", err.message);
+      logger.error("Orderbook WS error", err.message);
     });
   }
 
@@ -68,6 +74,7 @@ export class OrderbookStore {
       this.books.set(tokenId, {
         bids: levels(event.bids),
         asks: levels(event.asks),
+        minOrderSize: Number(event.min_order_size ?? 0),
       });
       this.onUpdate(tokenId);
     }
