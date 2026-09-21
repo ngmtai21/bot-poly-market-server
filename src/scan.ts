@@ -1,10 +1,11 @@
 import { ClobClient } from "@polymarket/clob-client";
-import { Wallet } from "ethers";
+import { createSigner } from "./signer.js";
 import { config } from "./config.js";
 import { fetchActiveMarkets } from "./markets.js";
 import { OrderbookStore } from "./orderbookStore.js";
 import { executeArb, sizeOpportunity } from "./executor.js";
 import { assertTradingReady } from "./preflight.js";
+import { computeNetMargin } from "./feeRate.js";
 import { logger } from "./logger.js";
 
 interface MarketInfo {
@@ -20,8 +21,8 @@ interface MarketInfo {
 // config.enableTrading — off by default, so this dry-runs until explicitly
 // enabled in .env.
 async function main() {
-  const wallet = new Wallet(config.privateKey);
-  const client = new ClobClient(config.clobApiUrl, 137, wallet, {
+  const signer = createSigner(config.privateKey);
+  const client = new ClobClient(config.clobApiUrl, 137, signer, {
     key: config.clobApiKey,
     secret: config.clobApiSecret,
     passphrase: config.clobApiPassphrase,
@@ -55,21 +56,30 @@ async function main() {
     const noAsk = store.getBestAsk(info.noTokenId);
     if (yesAsk == null || noAsk == null) return;
 
-    const margin = 1 - (yesAsk + noAsk);
-    if (margin <= config.minProfitMargin) return;
-
-    const yesBook = store.getBook(info.yesTokenId);
-    const noBook = store.getBook(info.noTokenId);
-    if (!yesBook || !noBook) return;
-
-    const opp = { ...info, yesAsk, noAsk, margin };
-    const shares = sizeOpportunity(opp, yesBook, noBook);
-
-    logger.info(`[ARB] ${info.question} | YES=${yesAsk} NO=${noAsk} margin=${margin.toFixed(4)} shares=${shares.toFixed(2)}`);
+    // Cheap pre-filter before the fee-rate lookup: skip anything that isn't
+    // even profitable before fees.
+    const rawMargin = 1 - (yesAsk + noAsk);
+    if (rawMargin <= 0) return;
 
     inFlight.add(info.conditionId);
-    executeArb(client, opp, shares)
-      .catch((err) => logger.error("executeArb threw", { question: info.question, err }))
+    computeNetMargin(client, info.yesTokenId, info.noTokenId, yesAsk, noAsk)
+      .then((margin) => {
+        if (margin <= config.minProfitMargin) return;
+
+        const yesBook = store.getBook(info.yesTokenId);
+        const noBook = store.getBook(info.noTokenId);
+        if (!yesBook || !noBook) return;
+
+        const opp = { ...info, yesAsk, noAsk, margin };
+        const shares = sizeOpportunity(opp, yesBook, noBook);
+
+        logger.info(
+          `[ARB] ${info.question} | YES=${yesAsk} NO=${noAsk} netMargin=${margin.toFixed(4)} shares=${shares.toFixed(2)}`
+        );
+
+        return executeArb(client, opp, shares);
+      })
+      .catch((err) => logger.error("Opportunity handling threw", { question: info.question, err }))
       .finally(() => inFlight.delete(info.conditionId));
   });
 

@@ -42,10 +42,10 @@ paper-trading numbers look worth it and after testing with a very small
 
 Polymarket charges a taker fee (`shares * feeRate * p * (1-p)`, feeRate up to
 7% depending on market category, peaking near p=0.5 — right where YES+NO
-tends to sit near 1). The bot does not know each market's exact fee category,
-so `MIN_PROFIT_MARGIN` defaults to a conservative `0.1` (10%) as a blanket
-buffer above the worst case, rather than computing the real fee per trade.
-Lowering it below the fee rate turns "profitable" opportunities into losses.
+tends to sit near 1). The bot fetches each market's real fee rate via the
+CLOB API and subtracts the expected fee before comparing against
+`MIN_PROFIT_MARGIN` (default `0.01`) — so the threshold only needs to cover
+slippage/execution risk, not the fee itself.
 
 ## Status
 
@@ -55,7 +55,8 @@ Lowering it below the fee rate turns "profitable" opportunities into losses.
 - [x] Position sizing vs orderbook depth
 - [x] Balance/allowance checks before trading
 - [x] Min order size enforcement (skips opportunities below exchange minimum)
-- [x] Fee-aware margin threshold (blanket buffer, not per-market fee)
+- [x] Fee-aware margin threshold (real per-market fee via `getFeeRateBps`)
+- [x] Zero known dependency vulnerabilities (`@polymarket/clob-client` v5 + `viem`, no `ethers`)
 - [ ] Persisted trade/opportunity history (for reporting)
 - [ ] Settlement/claim monitoring
 - [ ] Circuit breaker on repeated failures
