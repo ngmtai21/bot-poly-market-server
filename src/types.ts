@@ -4,4 +4,6 @@ export interface GammaMarket {
   clobTokenIds: string; // JSON-encoded string array: [yesTokenId, noTokenId]
   active: boolean;
   closed: boolean;
+  liquidityNum?: number;
+  volumeNum?: number;
 }

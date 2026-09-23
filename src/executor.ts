@@ -13,6 +13,8 @@ export interface ArbOpportunity {
   yesAsk: number;
   noAsk: number;
   margin: number;
+  liquidityNum?: number;
+  volumeNum?: number;
 }
 
 // Size (in shares) available at the best ask level.
@@ -53,13 +55,22 @@ async function sellFok(client: ClobClient, tokenId: string, shares: number) {
   );
 }
 
+// Two-tier strategy: an opportunity can clear the (low) logging threshold in
+// scan.ts but still be too thin to safely trade — this bot isn't the fastest
+// in the race, so a small margin is likely eaten by slippage/latency before
+// the order lands. Only margins at or above this bar are ever executed.
+export function isExecutable(margin: number): boolean {
+  return margin >= config.executeMarginThreshold;
+}
+
 // Buys both legs of a within-market arb concurrently as fill-or-kill market
 // orders (each either fills completely or not at all — no dangling partial
 // fills to manage mid-flight). If exactly one leg fills, the position is
 // directional and gets unwound with a best-effort market sell.
 export async function executeArb(client: ClobClient, opp: ArbOpportunity, shares: number): Promise<void> {
-  if (!config.enableTrading) {
-    logger.info("[DRY-RUN] would buy", { question: opp.question, shares, margin: opp.margin });
+  if (!config.enableTrading || !isExecutable(opp.margin)) {
+    const reason = !config.enableTrading ? "dry-run" : "below-execute-threshold";
+    logger.info(`[${reason.toUpperCase()}] would buy`, { question: opp.question, shares, margin: opp.margin });
     recordPaperTrade({
       conditionId: opp.conditionId,
       question: opp.question,
@@ -68,6 +79,9 @@ export async function executeArb(client: ClobClient, opp: ArbOpportunity, shares
       margin: opp.margin,
       shares,
       expectedProfitUsdc: shares * opp.margin,
+      liquidityNum: opp.liquidityNum,
+      volumeNum: opp.volumeNum,
+      reason,
     });
     return;
   }

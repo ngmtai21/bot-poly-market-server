@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import type { ClobClient } from "@polymarket/clob-client";
 import { computeNetMargin } from "../feeRate.js";
-import { sizeOpportunity, type ArbOpportunity } from "../executor.js";
+import { sizeOpportunity, isExecutable, type ArbOpportunity } from "../executor.js";
+import { config } from "../config.js";
 import type { Book } from "../orderbookStore.js";
 
 // Exercises the detection/sizing logic against synthetic orderbook data —
@@ -81,6 +82,14 @@ function testSizeOpportunityRejectsBelowMinOrderSize() {
   assert.equal(shares, 0, "should refuse to size an order below the exchange minimum");
 }
 
+function testIsExecutableTwoTierThreshold() {
+  // config.executeMarginThreshold (env default 0.05) is the higher "worth
+  // trading" bar, separate from the lower "worth logging" MIN_PROFIT_MARGIN.
+  assert.equal(isExecutable(config.executeMarginThreshold - 0.001), false, "just below threshold should not execute");
+  assert.equal(isExecutable(config.executeMarginThreshold), true, "exactly at threshold should execute");
+  assert.equal(isExecutable(config.executeMarginThreshold + 0.01), true, "above threshold should execute");
+}
+
 async function main() {
   const tests: [string, () => void | Promise<void>][] = [
     ["net margin subtracts fee correctly", testNetMarginSubtractsFee],
@@ -88,6 +97,7 @@ async function main() {
     ["sizeOpportunity caps to smaller leg's depth", testSizeOpportunityCapsToDepth],
     ["sizeOpportunity caps to MAX_ORDER_SIZE_USDC budget", testSizeOpportunityCapsToBudget],
     ["sizeOpportunity rejects orders below min_order_size", testSizeOpportunityRejectsBelowMinOrderSize],
+    ["isExecutable enforces the two-tier margin threshold", testIsExecutableTwoTierThreshold],
   ];
 
   let failed = 0;

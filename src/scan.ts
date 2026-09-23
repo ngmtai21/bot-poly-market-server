@@ -13,6 +13,8 @@ interface MarketInfo {
   question: string;
   yesTokenId: string;
   noTokenId: string;
+  liquidityNum?: number;
+  volumeNum?: number;
 }
 
 // Realtime scan: subscribes to live orderbooks via WebSocket and reacts to
@@ -38,7 +40,14 @@ async function main() {
 
   for (const m of markets) {
     const [yesTokenId, noTokenId] = JSON.parse(m.clobTokenIds) as [string, string];
-    const info: MarketInfo = { conditionId: m.conditionId, question: m.question, yesTokenId, noTokenId };
+    const info: MarketInfo = {
+      conditionId: m.conditionId,
+      question: m.question,
+      yesTokenId,
+      noTokenId,
+      liquidityNum: m.liquidityNum,
+      volumeNum: m.volumeNum,
+    };
     byTokenId.set(yesTokenId, info);
     byTokenId.set(noTokenId, info);
     tokenIds.push(yesTokenId, noTokenId);

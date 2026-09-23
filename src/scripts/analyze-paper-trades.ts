@@ -33,6 +33,29 @@ function main() {
   console.log(`Sizeable (shares > 0): ${sizeable.length}`);
   console.log(`Average margin: ${(avgMargin * 100).toFixed(2)}%`);
   console.log(`Total hypothetical profit: $${totalProfit.toFixed(2)}`);
+
+  // Two-tier strategy breakdown: "dry-run" means ENABLE_TRADING was off;
+  // "below-execute-threshold" means it was on but the margin didn't clear
+  // EXECUTE_MARGIN_THRESHOLD, so no real order was placed either way. Only
+  // opportunities with neither reason (not present here — those execute for
+  // real and aren't paper-logged) actually risked capital.
+  const belowThreshold = trades.filter((t) => t.reason === "below-execute-threshold");
+  if (belowThreshold.length > 0) {
+    console.log(`\nOf those, ${belowThreshold.length} were live (ENABLE_TRADING=true) but skipped —`);
+    console.log("margin didn't clear EXECUTE_MARGIN_THRESHOLD, so no capital was risked.");
+  }
+
+  // Correlates opportunity frequency with market liquidity — tells you
+  // whether real opportunities skew toward thin/low-attention markets (as
+  // expected, since crowded high-liquidity markets get arbitraged away
+  // faster by other bots) or not.
+  const withLiquidity = trades.filter((t) => typeof t.liquidityNum === "number");
+  if (withLiquidity.length > 0) {
+    const avgLiquidity = withLiquidity.reduce((sum, t) => sum + t.liquidityNum, 0) / withLiquidity.length;
+    const sorted = [...withLiquidity].sort((a, b) => a.liquidityNum - b.liquidityNum);
+    const median = sorted[Math.floor(sorted.length / 2)].liquidityNum;
+    console.log(`\nMarket liquidity of opportunities found — avg: $${avgLiquidity.toFixed(0)}, median: $${median.toFixed(0)}`);
+  }
 }
 
 main();
