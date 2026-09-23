@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Summarizes paper-trades.jsonl: how many dry-run opportunities were logged,
 // their average margin/size, and total hypothetical profit. Run after
@@ -6,6 +6,14 @@ import { readFileSync } from "node:fs";
 // is worth enabling.
 function main() {
   const path = process.argv[2] ?? "paper-trades.jsonl";
+
+  if (!existsSync(path)) {
+    console.log(`No paper-trades file found at "${path}" — the bot hasn't logged any opportunities yet.`);
+    console.log("This is expected if it just started; run `npm run status` for a lighter check, or let it");
+    console.log("run longer (hours, ideally 24h+) before analyzing.");
+    return;
+  }
+
   const lines = readFileSync(path, "utf-8").trim().split("\n").filter(Boolean);
   const trades = lines.map((l) => JSON.parse(l));
 
