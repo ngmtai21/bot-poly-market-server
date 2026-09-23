@@ -11,8 +11,11 @@ A Polymarket within-market arbitrage bot. For a binary market, if `YES ask + NO 
 ```bash
 npm run scan            # main entrypoint: connects to live orderbooks and logs arb opportunities
 npm run setup-api-key   # one-time: derives CLOB API key/secret/passphrase from PRIVATE_KEY, paste into .env
-npm run build           # tsc typecheck/compile to dist/
-npm run lint            # eslint src
+npm run status           # quick check: has the bot logged any opportunities yet (no stack trace if not)
+npm run analyze          # summarizes paper-trades.jsonl (opportunity count, avg margin, hypothetical profit)
+npm run self-test         # runs detection/sizing logic against synthetic orderbook fixtures, no live data needed
+npm run build            # tsc typecheck/compile to dist/
+npm run lint             # eslint src
 ```
 
 No test suite exists yet. Setup: `cp env.dist .env`, fill in `PRIVATE_KEY`, then run `setup-api-key` and paste the printed creds back into `.env`.

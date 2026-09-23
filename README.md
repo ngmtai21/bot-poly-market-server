@@ -14,6 +14,20 @@ risk-free profit regardless of outcome.
 4. Fund your Polymarket proxy wallet with USDC.e on Polygon (via
    polymarket.com deposit flow).
 
+## Testing the pipeline without waiting for live data
+
+```bash
+npm run self-test
+```
+
+Runs the detection/sizing logic (`computeNetMargin`, `sizeOpportunity`)
+against synthetic orderbook fixtures — verifies the math is correct in
+seconds, without needing a live WebSocket connection or waiting for a real
+opportunity. This is not a historical backtest (Polymarket doesn't expose
+historical orderbook depth to backtest against — see Fees section); it only
+proves the code's logic is correct, not that real opportunities are frequent
+or profitable. Use `npm run status` / `npm run analyze` for that.
+
 ## Usage
 
 ```bash
