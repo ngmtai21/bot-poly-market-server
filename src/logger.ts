@@ -3,7 +3,8 @@ type Level = "info" | "warn" | "error";
 function log(level: Level, msg: string, meta?: unknown): void {
   const line = `${new Date().toISOString()} [${level.toUpperCase()}] ${msg}`;
   const out = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-  meta === undefined ? out(line) : out(line, meta);
+  if (meta === undefined) out(line);
+  else out(line, meta);
 }
 
 export const logger = {
