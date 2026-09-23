@@ -19,7 +19,11 @@ export async function fetchActiveMarkets(): Promise<GammaMarket[]> {
     const res = await fetch(url);
     if (!res.ok) {
       if (offset === 0) throw new Error(`Gamma API error: ${res.status} ${res.statusText}`);
-      logger.warn(`Gamma API stopped paginating at offset=${offset} (${res.status}), using what was fetched so far`);
+      // Expected, not an error: the API uses a non-2xx status as its
+      // end-of-results signal past an undocumented offset ceiling, instead
+      // of an empty page. Logged at info so it doesn't route to pm2's
+      // error.log and look like something needs attention.
+      logger.info(`Gamma API pagination ended at offset=${offset} (${res.status}), using what was fetched so far`);
       break;
     }
     const page = (await res.json()) as GammaMarket[];
