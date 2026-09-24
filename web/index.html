@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arb Bot Admin</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card">
+      <h1>Arb Bot Admin</h1>
+      <p class="muted">Nhập ADMIN_TOKEN (trong .env trên VPS).</p>
+      <input id="login-token" type="password" autocomplete="current-password" placeholder="ADMIN_TOKEN" required>
+      <button type="submit" class="btn primary">Đăng nhập</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div class="brand"><span class="logo">◆</span> Arb Bot</div>
+    <nav id="tabs" class="tabs">
+      <button data-tab="dashboard" class="tab active">Dashboard</button>
+      <button data-tab="markets" class="tab">Markets</button>
+      <button data-tab="opportunities" class="tab">Opportunities</button>
+      <button data-tab="trades" class="tab">Trades</button>
+      <button data-tab="positions" class="tab">Positions</button>
+      <button data-tab="commands" class="tab">Commands</button>
+    </nav>
+    <div class="status-area">
+      <span id="mode-badge" class="badge">—</span>
+      <span id="online-pill" class="pill"><span class="dot"></span><span id="online-text">…</span></span>
+      <button id="logout" class="btn ghost small">Thoát</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-dashboard" class="tab-panel">
+      <div id="offline-banner" class="banner hidden">Bot đang OFFLINE — lệnh gửi lúc này sẽ hết hạn sau 60s nếu bot không lên lại.</div>
+      <div id="cards" class="cards"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <h2>Điều khiển</h2>
+          <div class="control-row">
+            <div>
+              <div class="label">Chế độ giao dịch</div>
+              <div id="trading-state" class="value-lg">—</div>
+            </div>
+            <button id="toggle-trading" class="btn">—</button>
+          </div>
+          <div class="control-row">
+            <div>
+              <div class="label">Thực thi lệnh</div>
+              <div id="pause-state" class="value-lg">—</div>
+            </div>
+            <button id="toggle-pause" class="btn">—</button>
+          </div>
+          <form id="settings-form" class="settings">
+            <label>Ngưỡng ghi log (%)
+              <input id="set-min" type="number" step="0.1" min="0" max="99" required>
+            </label>
+            <label>Ngưỡng thực thi (%)
+              <input id="set-exec" type="number" step="0.1" min="0" max="99" required>
+            </label>
+            <label>Size tối đa / lệnh (USDC)
+              <input id="set-size" type="number" step="1" min="1" required>
+            </label>
+            <button type="submit" class="btn primary">Lưu cấu hình</button>
+          </form>
+          <p class="muted small">Cấu hình lưu từ đây ghi đè giá trị trong .env và giữ nguyên khi restart bot.</p>
+        </div>
+        <div class="panel">
+          <h2>Cơ hội theo lý do</h2>
+          <div id="by-reason" class="reason-list"></div>
+          <h2>Bot</h2>
+          <dl id="bot-info" class="info-list"></dl>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-markets" class="tab-panel hidden">
+      <div id="market-list-view">
+        <div class="toolbar">
+          <input id="market-search" type="search" placeholder="Tìm market…">
+          <button id="market-refresh" class="btn small">Tải lại</button>
+          <span id="market-count" class="muted small"></span>
+        </div>
+        <div id="market-grid" class="market-grid"></div>
+      </div>
+      <div id="orderbook-view" class="hidden">
+        <button id="ob-back" class="btn ghost small">← Danh sách market</button>
+        <div class="ob-header">
+          <img id="ob-icon" class="ob-icon" alt="">
+          <div>
+            <h2 id="ob-title"></h2>
+            <div id="ob-sub" class="muted small"></div>
+          </div>
+        </div>
+        <div id="ob-summary" class="ob-summary"></div>
+        <div class="ob-books">
+          <div class="panel"><h3 class="yes">YES</h3><div id="ob-yes" class="book"></div></div>
+          <div class="panel"><h3 class="no">NO</h3><div id="ob-no" class="book"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-opportunities" class="tab-panel hidden">
+      <div class="toolbar">
+        <select id="opp-reason">
+          <option value="">Tất cả lý do</option>
+          <option value="executed">executed</option>
+          <option value="dry-run">dry-run</option>
+          <option value="paused">paused</option>
+          <option value="below-execute-threshold">below-execute-threshold</option>
+          <option value="unsizeable">unsizeable</option>
+        </select>
+      </div>
+      <div class="table-wrap"><table id="opp-table"></table></div>
+    </section>
+
+    <section id="tab-trades" class="tab-panel hidden">
+      <div class="table-wrap"><table id="trade-table"></table></div>
+    </section>
+
+    <section id="tab-positions" class="tab-panel hidden">
+      <p id="redeem-hint" class="banner hidden">Redeem chưa cấu hình: điền CTF_ADAPTER_ADDRESS / NEG_RISK_CTF_ADAPTER_ADDRESS / COLLATERAL_TOKEN_ADDRESS trong .env (xem README "Claiming winnings").</p>
+      <div class="table-wrap"><table id="position-table"></table></div>
+    </section>
+
+    <section id="tab-commands" class="tab-panel hidden">
+      <div class="table-wrap"><table id="command-table"></table></div>
+    </section>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

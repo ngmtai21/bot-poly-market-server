@@ -1,186 +1,151 @@
 # Polymarket arbitrage bot
 
 Detects within-market arbitrage on Polymarket: for a binary market, if
-`YES ask + NO ask < 1` (minus margin buffer), buying both sides locks in a
-risk-free profit regardless of outcome.
+`YES ask + NO ask < 1` (after fees), buying both sides locks in a profit
+regardless of outcome. Includes a web admin panel to monitor and control it.
+
+See [STRATEGY.md](STRATEGY.md) for a diagrammed walkthrough of the pipeline
+and the reasoning behind it.
 
 ## Setup
 
-1. `cp env.dist .env` and fill in `PRIVATE_KEY` (your Polygon EOA wallet key,
-   used to sign/derive API credentials — never commit this).
+1. `cp env.dist .env` and fill in `PRIVATE_KEY` (Polygon EOA wallet key —
+   never commit this) and `ADMIN_TOKEN` (see below).
 2. `npm install`
-3. `npm run setup-api-key` — derives your CLOB API key/secret/passphrase and
-   prints them; paste into `.env`.
-4. Fund your Polymarket proxy wallet with USDC.e on Polygon (via
-   polymarket.com deposit flow).
+3. `npm run setup-api-key` — derives CLOB API key/secret/passphrase; paste
+   into `.env`.
+4. For live trading only: fund the Polymarket proxy wallet with USDC.e and
+   keep some POL for gas (needed to redeem).
 
-## Testing the pipeline without waiting for live data
+## Running
 
-```bash
-npm run self-test
-```
-
-Runs the detection/sizing logic (`computeNetMargin`, `sizeOpportunity`)
-against synthetic orderbook fixtures — verifies the math is correct in
-seconds, without needing a live WebSocket connection or waiting for a real
-opportunity. This is not a historical backtest (Polymarket doesn't expose
-historical orderbook depth to backtest against — see Fees section); it only
-proves the code's logic is correct, not that real opportunities are frequent
-or profitable. Use `npm run status` / `npm run analyze` for that.
-
-## Usage
+Two separate processes, sharing one SQLite file (`data/bot.db`):
 
 ```bash
-npm run scan
+pm2 start "npm run scan"  --name polymarket-bot     # trading bot — holds the key
+pm2 start "npm run admin" --name polymarket-admin   # admin panel — never loads the key
+pm2 save
 ```
 
-Subscribes to live orderbooks and reacts to opportunities where
-`margin > MIN_PROFIT_MARGIN`.
+They're separate on purpose: the admin's HTTP traffic can't slow the bot's
+event loop, and a compromised web layer can't reach the wallet key. The
+admin only queues commands in SQLite; the bot re-validates and executes
+them.
 
-By default `ENABLE_TRADING=false` — the bot dry-runs (logs what it *would*
-buy, places no orders) and appends each opportunity to `paper-trades.jsonl`.
-Let it run for a while (hours/days), then:
+**The bot's speed is never traded off for the admin panel.** Two separate
+Node processes means separate event loops — admin HTTP handling cannot
+delay the bot's WS message processing regardless of load. At the SQLite
+layer (WAL mode), this was measured directly: a reader hammering
+`summarize()` in a tight loop (~5000 calls/sec — far past anything the
+5s-polling UI generates) left the bot's write latency unchanged (p99
+0.33ms → 0.31ms). `npm run scan` also runs at a higher OS scheduling
+priority than `npm run admin` (`nice -n -5` vs `-n 10` — needs root, which
+the VPS runs as; degrades harmlessly to normal priority otherwise) as a
+belt-and-suspenders guarantee under CPU pressure.
+
+## Admin panel
+
+- Generate a token and put it in `.env` as `ADMIN_TOKEN` (≥ 24 chars):
+  `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`
+- It binds to `127.0.0.1:8787` by default — **don't expose it publicly**.
+  From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>` then open
+  http://localhost:8787.
+
+Tabs:
+- **Dashboard** — P&L, opportunity counts by reason, bot health (heartbeat,
+  WS, books synced), and controls: enable/disable live trading, pause/resume,
+  change thresholds and order size.
+- **Markets** — top 500 markets by 24h volume and a live YES/NO orderbook,
+  loaded straight from Polymarket's public API/WebSocket by the browser.
+- **Opportunities / Trades / Positions / Commands** — everything the bot has
+  recorded; positions have a Redeem button once markets resolve.
+
+Control safety: enabling live trading requires typing `ENABLE` and passes the
+same balance/allowance preflight as startup (rolled back if it fails); order
+size is capped at $1000 from the UI; commands expire after 60s so a click
+made while the bot was down never fires hours later. Settings changed from
+the panel persist across restarts and **override `.env`** (logged at startup).
+
+## Checking the pipeline
 
 ```bash
-npm run analyze
+npm run self-test         # logic: margin/fee/sizing, ledger math, command validation
+npm run integration-test  # live network + local order signing (nothing submitted)
+npm run status            # is the bot alive, what has it seen
+npm run analyze           # full summary (same numbers as the dashboard)
 ```
 
-to see how many opportunities were sizeable and the total hypothetical
-profit — this is the realistic substitute for a historical backtest, since
-Polymarket doesn't expose historical orderbook depth. Set
-`ENABLE_TRADING=true` in `.env` to let it trade for real, only after the
-paper-trading numbers look worth it and after testing with a very small
-`MAX_ORDER_SIZE_USDC`.
+There's no historical backtest — Polymarket doesn't expose historical
+orderbook depth. Dry-run (`ENABLE_TRADING=false`, the default) is the
+substitute: every opportunity is recorded with why it wasn't traded.
 
 ## Fees
 
-Polymarket charges a taker fee (`shares * feeRate * p * (1-p)`, feeRate up to
-7-10% observed depending on market category, peaking near p=0.5 — right
-where YES+NO tends to sit near 1). The bot fetches each market's real fee
-rate via the CLOB API and subtracts the expected fee before comparing
-against `MIN_PROFIT_MARGIN` — so the threshold only needs to cover
-slippage/execution risk, not the fee itself.
+Taker fee is `shares * feeRate * p * (1-p)` per leg, feeRate per market (up
+to ~10% observed), peaking near p=0.5. The bot fetches each market's real
+rate and subtracts it before comparing against the thresholds.
 
 ## Two-tier margin strategy
 
-This bot is not the fastest participant in the arb race — measured ~250ms
-network RTT to Polymarket's infra from a non-US VPS (see Backlog). A thin
-margin is likely to be eaten by slippage or a faster competing bot before an
-order lands. So there are two separate thresholds:
-
-- `MIN_PROFIT_MARGIN` (default `0.01`) — the "worth logging" bar. Anything
-  above this is recorded to `paper-trades.jsonl`, so you can see true
-  opportunity frequency even for margins too thin to safely trade.
-- `EXECUTE_MARGIN_THRESHOLD` (default `0.05`) — the "worth actually risking
-  capital" bar. Only opportunities at or above this are ever executed, even
-  with `ENABLE_TRADING=true`. Opportunities between the two thresholds are
-  recorded with `reason: "below-execute-threshold"` but never traded.
-
-Raise `EXECUTE_MARGIN_THRESHOLD` further if `npm run analyze` shows real
-trades still losing to faster bots at 5%; lower it (carefully) only once
-infra latency is addressed.
+- `MIN_PROFIT_MARGIN` (default `0.01`) — "worth recording". Shows true
+  opportunity frequency even for margins too thin to trade.
+- `EXECUTE_MARGIN_THRESHOLD` (default `0.05`) — "worth risking capital".
+  From a non-US VPS (~250ms RTT) a thin margin is usually gone before the
+  order lands. Between the two thresholds: recorded as
+  `below-execute-threshold`, never traded.
 
 ## Claiming winnings
 
-After a market resolves, payout isn't automatic — winning outcome tokens
-must be redeemed via an on-chain transaction (`redeemPositions` on
-Polymarket's CTF collateral adapter contract), separate from the CLOB order
-API entirely. This costs POL (Polygon's gas token), not USDC.e.
+Payout after resolution isn't automatic — winning tokens are redeemed with an
+on-chain `redeemPositions` call (costs POL). Use the Redeem button in the
+Positions tab, or `npm run redeem -- <conditionId> [--neg-risk]`.
 
-```bash
-npm run redeem -- <conditionId> [--neg-risk]
-```
-
-**You must supply the contract addresses yourself** in `.env`
-(`CTF_ADAPTER_ADDRESS`, `NEG_RISK_CTF_ADAPTER_ADDRESS`,
-`COLLATERAL_TOKEN_ADDRESS`) — they are deliberately left blank in
-`env.dist`. Cross-referencing docs.polymarket.com and Polymarket's public
-GitHub did not produce a single address confirmable with confidence (the
-docs reference a newer "pUSD" wrapping flow that may not match the USDC.e
-flow this bot otherwise uses). **Do not paste an address from an AI
-response, a random blog post, or an unverified webpage** — a wrong contract
-address can burn your outcome tokens with no payout, and this is not
-reversible.
-
-How to verify the addresses yourself, safest to least-safe:
-1. **Best**: manually redeem one resolved position via the polymarket.com
-   UI yourself, then look up that transaction on
-   [polygonscan.com](https://polygonscan.com). The "To" address is the
-   correct adapter contract for that market's type (standard vs neg-risk);
-   the token received is the correct `COLLATERAL_TOKEN_ADDRESS`.
-2. Cross-check against Polymarket's official GitHub repos
-   (`Polymarket/conditional-tokens-contracts` and related) and their
-   official Discord/support if the above isn't conclusive.
-
-This script also checks the wallet's POL balance before submitting (a
-redeem transaction can't be signed/paid for without it) and exits with a
-clear error if it's 0.
-
-`npm run redeem` is a **manual, single-market trigger** — the bot does not
-yet auto-detect resolved markets it holds positions in. That needs a
-persisted position ledger, which doesn't exist yet (see Backlog).
+**You must supply the contract addresses yourself** (`CTF_ADAPTER_ADDRESS`,
+`NEG_RISK_CTF_ADAPTER_ADDRESS`, `COLLATERAL_TOKEN_ADDRESS`); they're blank
+in `env.dist` on purpose. Docs cross-referencing didn't yield an address
+confirmable with confidence (docs mention a newer "pUSD" flow). **Don't
+paste an address from an AI response or an unverified webpage** — a wrong
+one can burn your tokens irreversibly. Safest way: redeem one resolved
+position manually on polymarket.com, open that tx on polygonscan.com — the
+"To" address is the adapter for that market type; the token received is the
+collateral.
 
 ## Status
 
-- [x] Market scanner (Gamma API)
-- [x] Opportunity detector (within-market YES/NO spread)
-- [x] Order execution (both legs as FOK market orders, gated by `ENABLE_TRADING`)
-- [x] Position sizing vs orderbook depth
-- [x] Balance/allowance checks before trading
-- [x] Min order size enforcement (skips opportunities below exchange minimum)
-- [x] Fee-aware margin threshold (real per-market fee via `getFeeRateBps`)
-- [x] Zero known dependency vulnerabilities (`@polymarket/clob-client` v5 + `viem`, no `ethers`)
-- [x] Full market coverage via Gamma API pagination (~2100 markets, was capped at 100)
-- [x] Liquidity/volume tracked per opportunity (`liquidityNum`/`volumeNum` in `paper-trades.jsonl`) for correlating opportunity frequency with market thinness
-- [x] Two-tier margin strategy — separate "log" vs "execute" thresholds (`MIN_PROFIT_MARGIN` / `EXECUTE_MARGIN_THRESHOLD`), so thin margins the bot can't realistically win are recorded but never traded
-- [x] Manual redeem/claim script (`npm run redeem`) — on-chain `redeemPositions` call; contract addresses are self-verified (see "Claiming winnings"), not hardcoded, and POL gas balance is checked first
-- [ ] Persisted trade/opportunity history (for reporting)
-- [ ] Automatic settlement/claim monitoring (needs a position ledger — see Backlog)
+- [x] Full market coverage (~2100 markets via paginated Gamma API)
+- [x] Live orderbooks: WS `price_change` deltas + REST snapshots (on connect, every 10 min)
+- [x] Fee-aware net margin, two-tier thresholds, depth/min-order-size sizing
+- [x] Execution: both legs FOK, partial fill unwound, gated by `ENABLE_TRADING`
+- [x] Balance/allowance preflight (startup and on every live config change)
+- [x] SQLite ledger: opportunities, trades, positions, commands, settings
+- [x] Admin panel with controls, live orderbook viewer, redeem
+- [x] Zero known dependency vulnerabilities
+- [ ] Automatic redeem when a held market resolves (manual button for now)
 - [ ] Circuit breaker on repeated failures
 
-Partial fills are handled by unwinding the filled leg with a best-effort
-market sell — this reduces but does not eliminate directional risk if the
-market moves in the few seconds between legs. Start with real trading
-disabled and a tiny `MAX_ORDER_SIZE_USDC` before trusting this with capital.
+## Backlog
 
-## Backlog — noted for later, not yet done
-
-**Infra (biggest lever, not code):**
-- [ ] Move VPS to US East (near Polymarket's Cloudflare-fronted infra) — measured
-      ~250ms RTT from current location; est. drops to ~10-30ms once relocated.
-      Test candidate providers (Vultr/DigitalOcean/Linode/AWS) with the curl timing
-      command before committing to monthly billing (see conversation history).
+**Infra (biggest lever):**
+- [ ] Move VPS to US East — ~250ms RTT today; est. ~10-30ms after. Test
+      candidates with
+      `curl -s -o /dev/null -w "%{time_starttransfer}\n" https://clob.polymarket.com/`
+      before committing.
 
 **Reliability:**
-- [ ] Circuit breaker — stop the bot after N consecutive execution failures
-      instead of retrying indefinitely (e.g. wrong response shape, repeated
-      network errors).
-- [ ] Verify `createAndPostMarketOrder`'s real response shape end-to-end —
-      only ever exercised via `createOrder` (local signing, no submit) in
-      integration-test.ts. The actual submit/fill path is unverified until a
-      real trade happens; response-shape assumptions in `executor.ts`
-      (`.success !== false`) are confirmed correct per docs but never
-      observed from an actual fill/reject.
-- [ ] Automatic settlement/claim monitoring — `npm run redeem` exists but is
-      manual/single-market. Full automation needs a persisted position
-      ledger (which market/conditionId/shares the bot currently holds) that
-      doesn't exist yet, so the bot can detect "this resolved and I'm
-      holding tokens for it" on its own instead of you tracking it manually.
+- [ ] Circuit breaker — stop after N consecutive execution failures.
+- [ ] Observe a real `createAndPostMarketOrder` fill/reject — the `.success`
+      handling matches docs but has never seen a live response.
+- [ ] Auto-redeem: watch Gamma for resolution of markets in `positions`,
+      queue a redeem command.
 
-**Analysis / strategy validation:**
-- [ ] Let paper-trading run 24h+, then `npm run analyze` — the actual
-      blocking step before any real-trading decision.
-- [ ] Once there's opportunity data, check the liquidity/volume correlation
-      `analyze-paper-trades.ts` now prints — confirms or refutes the
-      "low-liquidity markets are less competed-over" hypothesis discussed.
+**Strategy validation:**
+- [ ] Let dry-run collect data 24h+ (on the US VPS), then check the
+      dashboard: frequency above 5%, and whether opportunities skew toward
+      low-liquidity markets.
 
-**Explicitly decided against (don't redo without new evidence):**
-- Rewriting in Go/Rust — bottleneck is network RTT (~250ms), not code
-  execution speed (measured <5ms overhead); not worth the engineering cost
-  of losing the official SDK unless VPS relocation still leaves Node.js as
-  a measurable bottleneck.
-- Worker threads / splitting the scan — bot is I/O-bound, not CPU-bound;
-  per-event processing is sub-millisecond even across ~4200 subscribed
-  tokens. No evidence of a WS subscription limit either.
-- Per-market fee category guessing — superseded by fetching the real fee
-  rate via `client.getFeeRateBps()`.
+**Decided against (don't redo without new evidence):**
+- Go/Rust rewrite — bottleneck is network RTT, not code (<5ms overhead measured).
+- Worker threads — bot is I/O-bound; per-event work is sub-millisecond.
+- Guessing fee by category — superseded by `client.getFeeRateBps()`.
+- React/Vite for the admin UI — three static files, no build step; revisit
+  if the UI grows substantially.

@@ -6,4 +6,5 @@ export interface GammaMarket {
   closed: boolean;
   liquidityNum?: number;
   volumeNum?: number;
+  negRisk?: boolean; // picks which CTF adapter redeems this market
 }

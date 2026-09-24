@@ -4,53 +4,57 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Polymarket within-market arbitrage bot. For a binary market, if `YES ask + NO ask < 1` (minus a margin buffer), buying both sides locks in a risk-free profit regardless of outcome. The bot detects opportunities and can place both legs automatically — gated behind `config.enableTrading` (`ENABLE_TRADING=true` in `.env`), which defaults to off (dry-run: opportunities are logged, no orders sent). See Status in README.md.
+A Polymarket within-market arbitrage bot plus a web admin panel. For a binary market, if `YES ask + NO ask < 1` (after fees), buying both sides locks in a profit regardless of outcome. Live order placement is gated behind `config.enableTrading` (`ENABLE_TRADING=true` in `.env`, or toggled from the admin panel), off by default — dry-run records every opportunity to SQLite without trading. See README.md for operations, STRATEGY.md for the strategy walkthrough.
 
 ## Commands
 
 ```bash
-npm run scan            # main entrypoint: connects to live orderbooks and logs arb opportunities
-npm run setup-api-key   # one-time: derives CLOB API key/secret/passphrase from PRIVATE_KEY, paste into .env
-npm run status           # quick check: has the bot logged any opportunities yet (no stack trace if not)
-npm run analyze          # summarizes paper-trades.jsonl (opportunity count, avg margin, hypothetical profit)
-npm run self-test         # runs detection/sizing logic against synthetic orderbook fixtures, no live data needed
-npm run build            # tsc typecheck/compile to dist/
-npm run lint             # eslint src
+npm run scan              # trading bot (process 1): live orderbooks -> detect -> execute; holds the key
+npm run admin             # admin panel (process 2): HTTP API + static UI in web/; never loads the key
+npm run setup-api-key     # one-time: derive CLOB API creds from PRIVATE_KEY, paste into .env
+npm run status            # is the bot alive (heartbeat in SQLite), latest opportunity
+npm run analyze           # summary from SQLite (same summarize() as the dashboard)
+npm run self-test         # assert-based logic tests (margin/fee/sizing, ledger, command validation)
+npm run integration-test  # live network: Gamma, CLOB REST, fee rate, local order signing (nothing submitted)
+npm run redeem -- <conditionId> [--neg-risk]   # manual on-chain redeem
+npm run build             # tsc
+npm run lint              # eslint src (includes the admin import restriction)
 ```
 
-No test suite exists yet. Setup: `cp env.dist .env`, fill in `PRIVATE_KEY`, then run `setup-api-key` and paste the printed creds back into `.env`.
+`node:sqlite` is built into Node 22 but emits an ExperimentalWarning; npm scripts pass `--disable-warning=ExperimentalWarning` to tsx so it doesn't land in pm2's error log.
 
-## Architecture
+## Two processes, one SQLite file
 
-Three-stage pipeline, wired together in [src/scan.ts](src/scan.ts):
+- **Bot** ([src/scan.ts](src/scan.ts)) — the only process with `PRIVATE_KEY`. Writes opportunities/trades/positions and a status heartbeat; polls the `commands` table every second via [src/control.ts](src/control.ts).
+- **Admin** ([src/admin/server.ts](src/admin/server.ts), `node:http`, no framework) — reads SQLite, inserts commands, serves [web/](web/). Loads `.env` via `dotenv` into a private object (`processEnv: {}`) and keeps only `ADMIN_*`/`DB_PATH`, so the key never enters its environment. [eslint.config.js](eslint.config.js) forbids `src/admin/**` from importing config/signer/redeem/executor/preflight/control/scan/viem/@polymarket — don't weaken it.
+- Separate processes also keep admin HTTP work off the bot's event loop (latency matters). SQLite runs in WAL mode with `busy_timeout` for concurrent access.
 
-1. **Market discovery** ([src/markets.ts](src/markets.ts)) — `fetchActiveMarkets()` polls the public Gamma REST API once at startup for all active/open binary markets, paginating via `offset` in pages of 100 (the API silently caps a single request at 100 results regardless of `limit`, so a naive single-request fetch only ever sees the first 100 markets out of ~2000+). The API also rejects offsets past an undocumented ceiling with a 422 instead of an empty page — treated as end-of-results once the first page has succeeded, not an error. Each market's `clobTokenIds` field is a JSON-encoded `[yesTokenId, noTokenId]` pair that has to be parsed.
-2. **Live orderbook tracking** ([src/orderbookStore.ts](src/orderbookStore.ts)) — `OrderbookStore` opens a single WebSocket to Polymarket's CLOB market channel, subscribes to every token id from step 1, and maintains an in-memory book (bids/asks with size) per token. It only handles full `"book"` snapshot events; incremental `price_change` deltas are intentionally ignored (a snapshot is sufficient for a margin check). Reconnects automatically on close.
-3. **Execution** ([src/executor.ts](src/executor.ts)) — `sizeOpportunity()` caps the trade at the smaller of: shares resting at the best ask on either leg, and `config.maxOrderSizeUsdc` worth of shares; returns 0 (skip) if that's below either leg's exchange-enforced `min_order_size` (from the orderbook, tracked per token in `OrderbookStore`/`Book.minOrderSize` — an order below it would just be rejected). `executeArb()` places both legs concurrently as fill-or-kill (`OrderType.FOK`) market orders via `createAndPostMarketOrder` — FOK means each leg either fills completely or not at all, so there's never a half-filled resting order to babysit. If exactly one leg fills (the other's FOK failed), the filled leg is immediately unwound with a best-effort FOK market sell; failure to unwind logs an error requiring manual intervention. All order placement is gated by `config.enableTrading` — false by default (dry-run, logs only).
+[src/db.ts](src/db.ts) — schema + all read/write helpers, shared by both processes (must never import config.ts). Tables: `opportunities` (every detected opportunity + `reason`: dry-run | paused | below-execute-threshold | unsizeable | executed), `trades` (real executions: filled | both_failed | partial_unwound | partial_unwind_failed), `positions` (ledger: a `filled` trade upserts by conditionId; cleared by `markRedeemed`), `commands` (admin→bot queue), `kv` (`status` heartbeat, `settings` overrides). `summarize()` is the single P&L aggregation used by both `npm run analyze` and `/api/summary`.
 
-**Fees are priced into the margin calculation** via [src/feeRate.ts](src/feeRate.ts). Polymarket charges a taker fee `fee = shares * feeRate * p * (1-p)` on each leg (feeRate varies per market, up to 0.07-0.10 observed, peaking near p=0.5 — the same region where YES+NO tends to be closest to 1). `computeNetMargin()` fetches the real fee rate via `client.getFeeRateBps(tokenId)` (cached indefinitely per token — fee rate doesn't change mid-run), then returns `rawMargin - feePerShare` as the net margin. `scan.ts` compares this net margin against `config.minProfitMargin` before sizing/executing at all.
+[src/commands.ts](src/commands.ts) — `validateCommand()` for `set_config | pause | resume | redeem`, run by the admin (early reject) **and** the bot (the real trust boundary). UI-settable `maxOrderSizeUsdc` capped at `MAX_ORDER_SIZE_CEILING_USDC`.
 
-**Two-tier margin strategy** — `config.minProfitMargin` (env default `0.01`) and `config.executeMarginThreshold` (env default `0.05`) are deliberately separate. The bot isn't the fastest in the arb race (measured ~250ms network RTT to Polymarket's infra from a non-US VPS; see conversation history / README backlog), so a thin margin is likely to be eaten by slippage or a faster competing bot before the order lands. `minProfitMargin` is the "worth logging" bar — low, so `paper-trades.jsonl` captures true opportunity frequency for analysis. `executor.ts`'s `isExecutable(margin)` gates actual execution at the higher `executeMarginThreshold` bar: opportunities between the two thresholds are always recorded (with `reason: "below-execute-threshold"` in the paper-trade entry) but never executed, even with `ENABLE_TRADING=true`. Only `reason: "dry-run"` (trading disabled) and real, unlogged executions (margin ≥ threshold, trading enabled) differ from this.
+[src/control.ts](src/control.ts) — bot side: executes commands, rejects ones older than 60s (queued while the bot was down), writes status every 5s and right after each command. `set_config` re-runs `assertTradingReady()` whenever the result is live and rolls the whole patch back on failure. Admin-changed settings persist in `kv.settings` and **override .env** at startup (`applySavedSettings`, logged).
 
-[src/scan.ts](src/scan.ts) ties these together: it builds a `tokenId -> {conditionId, question, yesTokenId, noTokenId}` map so that when either leg of a market's book updates, it can look up the other leg. A cheap raw-margin (`1 - (yesAsk + noAsk)`) pre-filter skips book updates that aren't even profitable before fees, avoiding an async `getFeeRateBps` call on every update; if that passes, it awaits `computeNetMargin()` and only sizes/executes once the fee-adjusted margin clears `config.minProfitMargin`. An `inFlight` set keyed by `conditionId` prevents re-entering this async chain for a market while a previous attempt on it hasn't resolved yet.
+## Trading pipeline (bot process)
 
-This is event-driven (WebSocket push), not polling — the scan loop reacts to book updates rather than running on a REST interval.
+1. **Market discovery** ([src/markets.ts](src/markets.ts)) — Gamma API paginated by `offset` in pages of 100 (API silently caps at 100 regardless of `limit`); a non-2xx past an undocumented ceiling (~2100) is its end-of-results signal (logged at info). `clobTokenIds` is a JSON-encoded `[yes, no]` string; `negRisk` picks the redeem adapter.
+2. **Orderbooks** ([src/orderbookStore.ts](src/orderbookStore.ts)) — one WS subscribed to all ~4200 tokens. **Measured: for a subscription this large the WS sends a `book` snapshot for only a handful of tokens; almost everything arrives as `price_change`.** So the store applies `price_change` level deltas (`price_changes[]` with per-change `asset_id`; older `changes[]` format also handled) and takes each change's server-computed `best_ask` as authoritative. Full snapshots come from REST `getOrderBooks` in batches of 500 (1000 fails) — loaded by `scan.ts` on every WS open and every 10 min. `booksSynced` in status shows coverage.
+3. **Detection** ([src/scan.ts](src/scan.ts), [src/feeRate.ts](src/feeRate.ts)) — cheap raw-margin pre-filter, then `computeNetMargin()` subtracts the real per-market taker fee (`shares*feeRate*p*(1-p)` per leg, rate via `client.getFeeRateBps`, cached per token). Proceeds only if net margin > `config.minProfitMargin`. `inFlight` (by conditionId) prevents overlapping handling of one market.
+4. **Sizing & execution** ([src/executor.ts](src/executor.ts)) — `sizeOpportunity()` = min(depth at *exactly* the ask price used for the margin on each leg, budget), 0 if below `min_order_size`; unknown depth ⇒ 0 ⇒ never trades on guessed liquidity. `executeArb()` records the opportunity with its skip reason, or executes: both legs as FOK market orders concurrently; a rejected order is `{success:false}` (resolved, not thrown) — `filled()` treats both as not-filled, including for the unwind sell. One leg filled ⇒ FOK sell to unwind. Two-tier gate: `isExecutable()` requires net margin ≥ `executeMarginThreshold` (thin margins are lost to faster bots from a ~250ms-RTT VPS); `config.paused` (runtime, admin-set) skips execution but keeps recording.
 
-[src/preflight.ts](src/preflight.ts) — `assertTradingReady()` runs once at scan startup (no-op if `enableTrading` is false). Checks USDC.e collateral balance and CLOB exchange allowance via `client.getBalanceAllowance`; throws before entering the scan loop if either is below `config.maxOrderSizeUsdc`, so a misconfigured/unfunded wallet fails fast instead of spamming failed orders once a real opportunity fires.
+[src/preflight.ts](src/preflight.ts) — `assertTradingReady()`: no-op unless live; checks USDC.e balance and CLOB allowance ≥ `maxOrderSizeUsdc`.
 
-[src/config.ts](src/config.ts) is the single source of runtime config, read from `.env` via `dotenv`; `required()` throws immediately if `PRIVATE_KEY` is missing, since everything downstream depends on the wallet. `enableTrading` is the safety gate for real order placement — only `ENABLE_TRADING=true` (exact string) turns it on.
+[src/redeem.ts](src/redeem.ts) — on-chain `redeemPositions` via viem, costs POL (`checkPolBalance`). Adapter/collateral addresses are **deliberately not hardcoded** (docs referenced an unverifiable newer "pUSD" flow); they come from `.env` and must be self-verified (README "Claiming winnings"). Never add default addresses.
 
-[src/scripts/setup-api-key.ts](src/scripts/setup-api-key.ts) is a standalone, run-once script (not part of the scan pipeline) that derives CLOB API credentials from the EOA private key via `@polymarket/clob-client`.
+[src/signer.ts](src/signer.ts) — viem `WalletClient` from the private key; clob-client v5 accepts it as `ClobSigner`. No `ethers` in this project.
 
-[src/redeem.ts](src/redeem.ts) + [src/scripts/redeem.ts](src/scripts/redeem.ts) (`npm run redeem -- <conditionId> [--neg-risk]`) — claiming winnings after a market resolves is an on-chain `redeemPositions` call to Polymarket's CTF collateral adapter contract, entirely separate from the CLOB order API, and costs POL (not USDC.e). The adapter/collateral contract addresses are deliberately **not hardcoded** — `config.ctfAdapterAddress`/`negRiskCtfAdapterAddress`/`collateralTokenAddress` default to empty and must be supplied in `.env`, self-verified (see README "Claiming winnings" for the verification procedure — cross-referencing docs.polymarket.com produced an unconfirmable/possibly-stale address referencing a newer "pUSD" flow, too risky to hardcode for a fund-moving transaction). The script checks POL balance via `checkPolBalance()` before submitting, since a redeem tx needs gas separate from trading capital. This is a **manual, single-market** trigger, not automatic — there's no persisted position ledger yet to know what the bot currently holds across resolved markets (see README Backlog).
+[src/config.ts](src/config.ts) — runtime config from `.env`; `required("PRIVATE_KEY")` throws at import, which is why the admin process must never import it. `paused` is runtime-only.
 
-[src/paperTradeLog.ts](src/paperTradeLog.ts) — `recordPaperTrade()` appends one JSON line per dry-run opportunity to `paper-trades.jsonl` (gitignored). Only called from `executeArb()`'s `!config.enableTrading` branch. [src/scripts/analyze-paper-trades.ts](src/scripts/analyze-paper-trades.ts) (`npm run analyze`) reads that file and prints opportunity count, average margin, and total hypothetical profit — used in place of a historical backtest, since Polymarket doesn't expose historical orderbook depth to backtest against.
+## Web UI ([web/](web/))
 
-[src/logger.ts](src/logger.ts) is the shared logger (timestamp + level prefix) used everywhere except `setup-api-key.ts`, which prints raw credentials to stdout for copy-pasting.
-
-[src/signer.ts](src/signer.ts) — `createSigner(privateKey)` builds a viem `WalletClient` (Polygon chain, HTTP transport) from the raw private key. `@polymarket/clob-client` v5+ dropped `ethers` in favor of viem's `WalletClient` (or a duck-typed `{_signTypedData, getAddress}` object) as its `ClobSigner` type — this project uses viem exclusively, no `ethers` dependency. Every place that needs a signer (`scan.ts`, `scripts/setup-api-key.ts`) goes through this function rather than constructing one inline.
+Plain ES module + CSS, no build step, served by the admin process under a strict CSP (`script-src 'self'`, no inline styles/scripts — set styles via CSSOM like `el.style.width`). All external data is rendered with `textContent` via the `h()` helper, never `innerHTML` — the page can enable live trading, so a crafted market title must not execute. The Markets tab talks to Polymarket directly from the browser (Gamma and CLOB are CORS `*`; WS is public) — the admin backend does not proxy market data.
 
 ## Conventions
 
-- ESM throughout (`"type": "module"` + `NodeNext` resolution) — relative imports must use explicit `.js` extensions even though the source is `.ts` (see imports in scan.ts/markets.ts).
-- `PRIVATE_KEY` is a real wallet key with fund access — never log it, never commit `.env`.
+- ESM throughout (`"type": "module"` + `NodeNext`) — relative imports use explicit `.js` extensions.
+- `PRIVATE_KEY` is a real wallet key — never log it, never commit `.env`; `data/` (SQLite) is gitignored.

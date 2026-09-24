@@ -1,0 +1,400 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { publicEncrypt, constants as cryptoConstants, randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
+import { config as loadDotenv } from "dotenv";
+import {
+  DEFAULT_DB_PATH,
+  openDb,
+  getKv,
+  setKv,
+  insertCommand,
+  summarize,
+  createUser,
+  findUserByUsername,
+  findUserById,
+  listUsers,
+  countAdmins,
+  deleteUser,
+  updateUserPassword,
+} from "../db.js";
+import { validateCommand } from "../commands.js";
+import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, type Role, type SessionPayload } from "../auth.js";
+
+// Admin API + static UI, as a SEPARATE process from the trading bot:
+// - its event loop can't slow the bot's hot path, and
+// - it never holds the wallet key. It only reads SQLite and queues
+//   commands; the bot process validates and executes them.
+// ESLint (eslint.config.js) blocks this folder from importing any module
+// that touches PRIVATE_KEY or signing.
+
+// Parse .env into a private object instead of process.env, then keep only
+// what this process needs — PRIVATE_KEY (and its rotation-decrypt
+// counterpart, WALLET_KEY_DECRYPT_PRIVATE_KEY) never enter this environment.
+const fileEnv: Record<string, string> = {};
+loadDotenv({ processEnv: fileEnv, quiet: true });
+const env = (k: string) => process.env[k] ?? fileEnv[k];
+const HOST = env("ADMIN_HOST") ?? "127.0.0.1";
+const PORT = Number(env("ADMIN_PORT") ?? 8787);
+const DB_PATH = env("DB_PATH") ?? DEFAULT_DB_PATH;
+let SESSION_SECRET = env("SESSION_SECRET") ?? "";
+for (const k of Object.keys(fileEnv)) delete fileEnv[k];
+
+if (!SESSION_SECRET) {
+  // A signing secret, not a user credential — losing it lets someone forge
+  // session tokens, but it alone never reveals a password or the wallet
+  // key. Auto-generating one on first boot (and warning loudly) beats
+  // forcing yet another value into .env before the panel is usable; set
+  // SESSION_SECRET explicitly in .env for a stable value across restarts
+  // (otherwise every restart invalidates existing sessions).
+  SESSION_SECRET = randomBytes32Hex();
+  console.warn("SESSION_SECRET not set in .env — using a random one for this run (all sessions drop on restart).");
+  console.warn(`Set SESSION_SECRET=${SESSION_SECRET} in .env to keep sessions stable across restarts.`);
+}
+function randomBytes32Hex(): string {
+  return randomBytes(32).toString("hex");
+}
+
+const db = openDb(DB_PATH);
+const WEB_ROOT = resolve("web");
+const HEARTBEAT_STALE_MS = 15_000;
+const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+interface AuthedRequest extends IncomingMessage {
+  session?: SessionPayload;
+}
+
+function bearerToken(req: IncomingMessage): string | null {
+  const header = req.headers.authorization ?? "";
+  return header.startsWith("Bearer ") ? header.slice(7) : null;
+}
+
+function authenticate(req: AuthedRequest): SessionPayload | null {
+  const token = bearerToken(req);
+  if (!token) return null;
+  const session = verifySessionToken(token, SESSION_SECRET);
+  if (!session) return null;
+  // Reject sessions for users deleted after the token was issued.
+  if (!findUserById(db, session.userId)) return null;
+  req.session = session;
+  return session;
+}
+
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  // The UI talks to its own API plus Polymarket's public endpoints directly
+  // (orderbook/markets are public, CORS-open — no need to proxy them).
+  "Content-Security-Policy": [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data: https:",
+    "connect-src 'self' https://gamma-api.polymarket.com https://clob.polymarket.com wss://ws-subscriptions-clob.polymarket.com",
+    "frame-ancestors 'none'",
+  ].join("; "),
+};
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { ...SECURITY_HEADERS, "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  let size = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > 10_000) throw new Error("body too large");
+    chunks.push(chunk as Buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+}
+
+function limitParam(url: URL): number {
+  const n = Number(url.searchParams.get("limit") ?? 200);
+  return Number.isFinite(n) ? Math.min(Math.max(Math.trunc(n), 1), 1000) : 200;
+}
+
+function userView(u: { id: number; username: string; role: Role; created_at: string }) {
+  return { id: u.id, username: u.username, role: u.role, createdAt: u.created_at };
+}
+
+async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Promise<void> {
+  const route = `${req.method} ${url.pathname}`;
+
+  // Login is the only unauthenticated route.
+  if (route === "POST /api/auth/login") {
+    let body: { username?: unknown; password?: unknown };
+    try {
+      body = (await readJson(req)) as typeof body;
+    } catch {
+      return send(res, 400, { error: "invalid JSON body" });
+    }
+    if (typeof body.username !== "string" || typeof body.password !== "string") {
+      return send(res, 400, { error: "username and password are required" });
+    }
+    const user = findUserByUsername(db, body.username);
+    if (!user || !verifyPassword(body.password, user.password_hash)) {
+      return send(res, 401, { error: "invalid username or password" });
+    }
+    const token = createSessionToken({ userId: user.id, username: user.username, role: user.role }, SESSION_SECRET);
+    return send(res, 200, { token, username: user.username, role: user.role });
+  }
+
+  const session = authenticate(req);
+  if (!session) return send(res, 401, { error: "unauthorized" });
+  const isAdmin = session.role === "admin";
+  const requireAdmin = () => isAdmin;
+
+  switch (route) {
+    case "POST /api/auth/change-password": {
+      let body: { currentPassword?: unknown; newPassword?: unknown };
+      try {
+        body = (await readJson(req)) as typeof body;
+      } catch {
+        return send(res, 400, { error: "invalid JSON body" });
+      }
+      const user = findUserById(db, session.userId)!;
+      if (typeof body.currentPassword !== "string" || !verifyPassword(body.currentPassword, user.password_hash)) {
+        return send(res, 400, { error: "current password is incorrect" });
+      }
+      if (typeof body.newPassword !== "string" || body.newPassword.length < 8) {
+        return send(res, 400, { error: "newPassword must be at least 8 characters" });
+      }
+      updateUserPassword(db, user.id, hashPassword(body.newPassword));
+      return send(res, 200, { ok: true });
+    }
+
+    case "GET /api/status": {
+      const status = getKv<Record<string, unknown>>(db, "status");
+      const age = status ? Date.now() - Date.parse(String(status.heartbeat)) : null;
+      return send(res, 200, { status, heartbeatAgeMs: age, online: age !== null && age < HEARTBEAT_STALE_MS });
+    }
+    case "GET /api/summary":
+      return send(res, 200, summarize(db));
+    case "GET /api/opportunities": {
+      const reason = url.searchParams.get("reason");
+      const rows = reason
+        ? db.prepare(`SELECT * FROM opportunities WHERE reason = ? ORDER BY id DESC LIMIT ?`).all(reason, limitParam(url))
+        : db.prepare(`SELECT * FROM opportunities ORDER BY id DESC LIMIT ?`).all(limitParam(url));
+      return send(res, 200, rows);
+    }
+    case "GET /api/trades":
+      return send(res, 200, db.prepare(`SELECT * FROM trades ORDER BY id DESC LIMIT ?`).all(limitParam(url)));
+    case "GET /api/positions":
+      return send(res, 200, db.prepare(`SELECT * FROM positions ORDER BY redeemed_at IS NOT NULL, opened_at DESC`).all());
+    case "GET /api/commands":
+      return send(res, 200, db.prepare(`SELECT * FROM commands ORDER BY id DESC LIMIT ?`).all(limitParam(url)));
+
+    case "POST /api/commands": {
+      if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+      let body: { type?: unknown; payload?: unknown };
+      try {
+        body = (await readJson(req)) as typeof body;
+      } catch {
+        return send(res, 400, { error: "invalid JSON body" });
+      }
+      try {
+        const cmd = validateCommand(body.type, body.payload);
+        return send(res, 201, { id: insertCommand(db, cmd.type, cmd.payload) });
+      } catch (err) {
+        return send(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    // ---- User management (admin only) ----
+    case "GET /api/users": {
+      if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+      return send(res, 200, listUsers(db).map(userView));
+    }
+    case "POST /api/users": {
+      if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+      let body: { username?: unknown; password?: unknown; role?: unknown };
+      try {
+        body = (await readJson(req)) as typeof body;
+      } catch {
+        return send(res, 400, { error: "invalid JSON body" });
+      }
+      if (typeof body.username !== "string" || !/^[a-zA-Z0-9_.-]{3,32}$/.test(body.username)) {
+        return send(res, 400, { error: "username must be 3-32 chars (letters, digits, _ . -)" });
+      }
+      if (typeof body.password !== "string" || body.password.length < 8) {
+        return send(res, 400, { error: "password must be at least 8 characters" });
+      }
+      if (body.role !== "admin" && body.role !== "guest") {
+        return send(res, 400, { error: "role must be 'admin' or 'guest'" });
+      }
+      if (findUserByUsername(db, body.username)) {
+        return send(res, 400, { error: "username already exists" });
+      }
+      const id = createUser(db, body.username, hashPassword(body.password), body.role);
+      return send(res, 201, { id });
+    }
+
+    default:
+      break;
+  }
+
+  // Routes with a path parameter.
+  const userIdMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
+  if (userIdMatch && req.method === "DELETE") {
+    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+    const id = Number(userIdMatch[1]);
+    const target = findUserById(db, id);
+    if (!target) return send(res, 404, { error: "not found" });
+    if (id === session.userId) return send(res, 400, { error: "cannot delete your own account" });
+    if (target.role === "admin" && countAdmins(db) <= 1) {
+      return send(res, 400, { error: "cannot delete the last admin account" });
+    }
+    deleteUser(db, id);
+    return send(res, 200, { ok: true });
+  }
+  const resetMatch = url.pathname.match(/^\/api\/users\/(\d+)\/reset-password$/);
+  if (resetMatch && req.method === "POST") {
+    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+    const id = Number(resetMatch[1]);
+    if (!findUserById(db, id)) return send(res, 404, { error: "not found" });
+    let body: { password?: unknown };
+    try {
+      body = (await readJson(req)) as typeof body;
+    } catch {
+      return send(res, 400, { error: "invalid JSON body" });
+    }
+    if (typeof body.password !== "string" || body.password.length < 8) {
+      return send(res, 400, { error: "password must be at least 8 characters" });
+    }
+    updateUserPassword(db, id, hashPassword(body.password));
+    return send(res, 200, { ok: true });
+  }
+
+  // ---- Contract-address config (view: any role, edit: admin only) ----
+  if (route === "GET /api/config/addresses") {
+    return send(
+      res,
+      200,
+      getKv(db, "contractAddresses") ?? {
+        ctfAdapterAddress: "",
+        negRiskCtfAdapterAddress: "",
+        collateralTokenAddress: "",
+      }
+    );
+  }
+  if (route === "PUT /api/config/addresses") {
+    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+    let body: Record<string, unknown>;
+    try {
+      body = (await readJson(req)) as Record<string, unknown>;
+    } catch {
+      return send(res, 400, { error: "invalid JSON body" });
+    }
+    const fields = ["ctfAdapterAddress", "negRiskCtfAdapterAddress", "collateralTokenAddress"] as const;
+    const out: Record<string, string> = {};
+    for (const f of fields) {
+      const v = body[f];
+      if (v === undefined || v === "") {
+        out[f] = "";
+        continue;
+      }
+      if (typeof v !== "string" || !HEX_ADDRESS.test(v)) {
+        return send(res, 400, { error: `${f} must be a 0x-prefixed 20-byte hex address` });
+      }
+      out[f] = v;
+    }
+    setKv(db, "contractAddresses", out);
+    return send(res, 200, out);
+  }
+
+  // ---- Wallet key rotation (admin only) ----
+  // The admin process only ever holds the PUBLIC half of this keypair — it
+  // can encrypt a new key but never decrypt one. Only the bot process,
+  // which holds WALLET_KEY_DECRYPT_PRIVATE_KEY in its own .env, can recover
+  // the plaintext (see src/walletKeyRotation.ts).
+  if (route === "GET /api/wallet/rotation-status") {
+    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+    const publicKey = getKv<string>(db, "walletKeyPublicKey");
+    const staged = getKv<{ stagedAt: string }>(db, "stagedWalletKey");
+    return send(res, 200, { enabled: !!publicKey, stagedAt: staged?.stagedAt ?? null });
+  }
+  if (route === "POST /api/wallet/stage-key") {
+    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+    const publicKey = getKv<string>(db, "walletKeyPublicKey");
+    if (!publicKey) {
+      return send(res, 400, { error: "rotation keypair not set up — run `npm run setup-admin` on the server first" });
+    }
+    let body: { privateKey?: unknown };
+    try {
+      body = (await readJson(req)) as typeof body;
+    } catch {
+      return send(res, 400, { error: "invalid JSON body" });
+    }
+    if (typeof body.privateKey !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(body.privateKey)) {
+      return send(res, 400, { error: "privateKey must be a 0x-prefixed 32-byte hex string" });
+    }
+    // Encrypt immediately; the plaintext is never logged, persisted, or
+    // held longer than this request.
+    const ciphertext = publicEncrypt(
+      { key: publicKey, oaepHash: "sha256", padding: cryptoConstants.RSA_PKCS1_OAEP_PADDING },
+      Buffer.from(body.privateKey, "utf8")
+    ).toString("base64");
+    body.privateKey = "";
+    setKv(db, "stagedWalletKey", { ciphertext, stagedAt: new Date().toISOString() });
+    return send(res, 200, { ok: true, note: "Staged — restart the bot process (npm run scan) to apply it." });
+  }
+
+  return send(res, 404, { error: "not found" });
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+async function handleStatic(res: ServerResponse, url: URL): Promise<void> {
+  const file = resolve(WEB_ROOT, "." + (url.pathname === "/" ? "/index.html" : url.pathname));
+  if (!file.startsWith(WEB_ROOT + sep)) return send(res, 404, { error: "not found" });
+  try {
+    const data = await readFile(file);
+    res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": CONTENT_TYPES[extname(file)] ?? "application/octet-stream" });
+    res.end(data);
+  } catch {
+    send(res, 404, { error: "not found" });
+  }
+}
+
+if (countAdmins(db) === 0) {
+  console.warn("No admin account exists yet — run `npm run setup-admin` before logging in.");
+}
+
+createServer((req, res) => {
+  // Bearer-token auth (no cookies), so reflecting the caller's Origin is
+  // safe from CSRF — it only widens *which pages* can read a response the
+  // caller must already have a valid session token to obtain. Needed
+  // because the new admin SPA is served from its own origin (e.g. the Vite
+  // dev server) rather than by this same process.
+  if (req.headers.origin) {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  }
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const handler = url.pathname.startsWith("/api/") ? handleApi(req, res, url) : handleStatic(res, url);
+  handler.catch((err) => {
+    console.error("admin request failed", err);
+    if (!res.headersSent) send(res, 500, { error: "internal error" });
+  });
+}).listen(PORT, HOST, () => {
+  console.log(`Admin panel on http://${HOST}:${PORT} (db: ${DB_PATH})`);
+  if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+    console.warn("WARNING: admin is bound to a non-loopback address — prefer 127.0.0.1 + SSH tunnel.");
+  }
+});

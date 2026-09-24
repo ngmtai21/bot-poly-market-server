@@ -4,6 +4,8 @@ import { computeNetMargin } from "../feeRate.js";
 import { sizeOpportunity, isExecutable, type ArbOpportunity } from "../executor.js";
 import { config } from "../config.js";
 import type { Book } from "../orderbookStore.js";
+import { openDb, recordOpportunity, recordTrade, summarize } from "../db.js";
+import { validateCommand } from "../commands.js";
 
 // Exercises the detection/sizing logic against synthetic orderbook data —
 // no live WebSocket, no waiting for real opportunities. This is a substitute
@@ -90,8 +92,39 @@ function testIsExecutableTwoTierThreshold() {
   assert.equal(isExecutable(config.executeMarginThreshold + 0.01), true, "above threshold should execute");
 }
 
+function testLedgerAndSummary() {
+  const db = openDb(":memory:");
+  const base = { conditionId: "0xc1", question: "q", yesAsk: 0.4, noAsk: 0.5, margin: 0.1, negRisk: false };
+  recordOpportunity(db, { ...base, shares: 10, reason: "dry-run" });
+  recordOpportunity(db, { ...base, shares: 0, reason: "unsizeable" });
+  recordTrade(db, { ...base, shares: 10, yesSpend: 4, noSpend: 5, status: "filled" });
+  recordTrade(db, { ...base, shares: 5, yesSpend: 2, noSpend: 2.5, status: "filled" }); // same market: accumulates
+  recordTrade(db, { ...base, shares: 10, yesSpend: 4, noSpend: 5, status: "both_failed" }); // no position
+
+  const s = summarize(db);
+  assert.equal(s.opportunities.total, 2);
+  assert.equal(s.opportunities.sizeable, 1);
+  assert.ok(Math.abs(Number(s.opportunities.hypotheticalProfit) - 1) < 1e-9, "only sizeable rows count toward profit");
+  assert.equal(s.trades.byStatus.filled, 2);
+  assert.equal(s.openPositions.count, 1, "two fills in one market = one position");
+  assert.ok(Math.abs(s.openPositions.lockedCapital - 13.5) < 1e-9);
+  assert.equal(s.openPositions.expectedPayout, 15, "payout = shares (one leg pays $1/share)");
+}
+
+function testValidateCommand() {
+  assert.deepEqual(validateCommand("pause", undefined), { type: "pause", payload: {} });
+  assert.throws(() => validateCommand("set_config", { maxOrderSizeUsdc: 50000 }), /maxOrderSizeUsdc/);
+  assert.throws(() => validateCommand("set_config", { minProfitMargin: 5 }), /minProfitMargin/, "5 means 500%, reject");
+  assert.throws(() => validateCommand("set_config", { enableTrading: "true" }), /enableTrading/, "string 'true' is not a boolean");
+  assert.throws(() => validateCommand("set_config", {}), /at least one/);
+  assert.throws(() => validateCommand("redeem", { conditionId: "0x123", negRisk: false }), /conditionId/);
+  assert.throws(() => validateCommand("drop_tables", {}), /unknown command/);
+}
+
 async function main() {
   const tests: [string, () => void | Promise<void>][] = [
+    ["ledger: fills open/accumulate positions, summary math", testLedgerAndSummary],
+    ["validateCommand rejects unsafe/malformed input", testValidateCommand],
     ["net margin subtracts fee correctly", testNetMarginSubtractsFee],
     ["net margin equals raw margin at 0% fee", testNetMarginZeroFeeMarket],
     ["sizeOpportunity caps to smaller leg's depth", testSizeOpportunityCapsToDepth],

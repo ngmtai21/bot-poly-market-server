@@ -1,13 +1,12 @@
 import "dotenv/config";
-
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var ${name}`);
-  return v;
-}
+import { DEFAULT_DB_PATH } from "./db.js";
 
 export const config = {
-  privateKey: required("PRIVATE_KEY"),
+  // Optional: a key can also be staged from the admin panel (RSA-OAEP
+  // encrypted, decrypted only inside this process — see
+  // walletKeyRotation.ts) instead of living in .env at all. scan.ts checks
+  // that path first and falls back to this value.
+  privateKey: process.env.PRIVATE_KEY ?? "",
   clobApiUrl: process.env.CLOB_API_URL ?? "https://clob.polymarket.com",
   clobApiKey: process.env.CLOB_API_KEY ?? "",
   clobApiSecret: process.env.CLOB_API_SECRET ?? "",
@@ -29,4 +28,8 @@ export const config = {
   ctfAdapterAddress: (process.env.CTF_ADAPTER_ADDRESS ?? "") as `0x${string}`,
   negRiskCtfAdapterAddress: (process.env.NEG_RISK_CTF_ADAPTER_ADDRESS ?? "") as `0x${string}`,
   collateralTokenAddress: (process.env.COLLATERAL_TOKEN_ADDRESS ?? "") as `0x${string}`,
+  dbPath: process.env.DB_PATH ?? DEFAULT_DB_PATH,
+  // Runtime-only (not from .env): set by the admin panel's pause/resume.
+  // Paused = keep scanning and logging, but never execute.
+  paused: false,
 };
