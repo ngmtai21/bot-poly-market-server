@@ -19,7 +19,7 @@ async function main() {
 
   if (!config.ctfAdapterAddress || !config.negRiskCtfAdapterAddress || !config.collateralTokenAddress) {
     console.error(
-      "Missing CTF_ADAPTER_ADDRESS / NEG_RISK_CTF_ADAPTER_ADDRESS / COLLATERAL_TOKEN_ADDRESS in .env.\n" +
+      "Missing CTF_ADAPTER_ADDRESS / NEG_RISK_CTF_ADAPTER_ADDRESS / COLLATERAL_TOKEN_ADDRESS in .env.bot.\n" +
         "See README's 'Claiming winnings' section for how to verify these yourself before setting them."
     );
     process.exit(1);

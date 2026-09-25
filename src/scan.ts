@@ -58,7 +58,7 @@ interface MarketInfo {
 // the within-market arb condition (YES ask + NO ask < 1) on every book
 // update, instead of polling REST on an interval. Trading is gated by
 // config.enableTrading — off by default, so this dry-runs until explicitly
-// enabled in .env or from the admin panel.
+// enabled in .env.bot or from the admin panel.
 async function main() {
   const db = openDb(config.dbPath);
   applySavedSettings(db);
@@ -66,7 +66,7 @@ async function main() {
   const privateKey = consumeStagedPrivateKey(db, process.env.WALLET_KEY_DECRYPT_PRIVATE_KEY) ?? config.privateKey;
   if (!privateKey) {
     throw new Error(
-      "No wallet key available — set PRIVATE_KEY in .env, or stage one from the admin panel (see README 'Rotating the wallet key')."
+      "No wallet key available — set PRIVATE_KEY in .env.bot, or stage one from the admin panel (see README 'Rotating the wallet key')."
     );
   }
   const signer = createSigner(privateKey);

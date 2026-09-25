@@ -117,7 +117,7 @@ async function runCommand(cmd: Command, db: Db, client: ClobClient, signer: Wall
 
     case "redeem": {
       if (!config.ctfAdapterAddress || !config.negRiskCtfAdapterAddress || !config.collateralTokenAddress) {
-        throw new Error("Redeem contract addresses not set in .env — see README 'Claiming winnings'");
+        throw new Error("Redeem contract addresses not set in .env.bot — see README 'Claiming winnings'");
       }
       const address = signer.account!.address;
       if ((await checkPolBalance(address)) === 0n) throw new Error("Wallet has 0 POL — redeem needs gas");

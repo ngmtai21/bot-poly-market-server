@@ -19,7 +19,7 @@ loadDotenv({ path: ".env.bot", quiet: true });
 export const config = {
   // Optional: a key can also be staged from the admin panel (RSA-OAEP
   // encrypted, decrypted only inside this process — see
-  // walletKeyRotation.ts) instead of living in .env at all. scan.ts checks
+  // walletKeyRotation.ts) instead of living in .env.bot at all. scan.ts checks
   // that path first and falls back to this value.
   privateKey: process.env.PRIVATE_KEY ?? "",
   clobApiUrl: process.env.CLOB_API_URL ?? "https://clob.polymarket.com",
