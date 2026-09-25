@@ -43,13 +43,13 @@ function restore(s: Settings): void {
 }
 
 // Settings changed from the admin panel persist across restarts and take
-// precedence over .env — logged loudly so an edited .env that "doesn't take
-// effect" isn't a mystery.
+// precedence over .env.bot — logged loudly so an edited .env.bot that
+// "doesn't take effect" isn't a mystery.
 export function applySavedSettings(db: Db): void {
   const saved = getKv<Settings>(db, SETTINGS_KEY);
   if (saved) {
     restore({ ...currentSettings(), ...saved });
-    logger.info("Applied admin-panel settings (these override .env)", saved);
+    logger.info("Applied admin-panel settings (these override .env.bot)", saved);
   }
 
   const addresses = getKv<Record<string, string>>(db, "contractAddresses");
@@ -57,7 +57,7 @@ export function applySavedSettings(db: Db): void {
     if (addresses.ctfAdapterAddress) config.ctfAdapterAddress = addresses.ctfAdapterAddress as `0x${string}`;
     if (addresses.negRiskCtfAdapterAddress) config.negRiskCtfAdapterAddress = addresses.negRiskCtfAdapterAddress as `0x${string}`;
     if (addresses.collateralTokenAddress) config.collateralTokenAddress = addresses.collateralTokenAddress as `0x${string}`;
-    logger.info("Applied admin-panel contract addresses (these override .env)", addresses);
+    logger.info("Applied admin-panel contract addresses (these override .env.bot)", addresses);
   }
 }
 

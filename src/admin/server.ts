@@ -348,7 +348,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
   // ---- Wallet key rotation (admin only) ----
   // The admin process only ever holds the PUBLIC half of this keypair — it
   // can encrypt a new key but never decrypt one. Only the bot process,
-  // which holds WALLET_KEY_DECRYPT_PRIVATE_KEY in its own .env, can recover
+  // which holds WALLET_KEY_DECRYPT_PRIVATE_KEY in its own .env.bot, can recover
   // the plaintext (see src/walletKeyRotation.ts).
   if (route === "GET /api/wallet/rotation-status") {
     if (!requireAdmin()) return send(res, 403, { error: "admin role required" });

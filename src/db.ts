@@ -78,8 +78,8 @@ export function openDb(path: string): Db {
     );
 
     -- Admin-panel accounts. Passwords are never stored in plaintext or in
-    -- .env — only a salted scrypt hash lives here (see src/auth.ts), so a
-    -- leaked DB file alone doesn't yield a usable credential.
+    -- any env file — only a salted scrypt hash lives here (see src/auth.ts),
+    -- so a leaked DB file alone doesn't yield a usable credential.
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,

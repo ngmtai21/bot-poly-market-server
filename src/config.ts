@@ -44,7 +44,7 @@ export const config = {
   negRiskCtfAdapterAddress: (process.env.NEG_RISK_CTF_ADAPTER_ADDRESS ?? "") as `0x${string}`,
   collateralTokenAddress: (process.env.COLLATERAL_TOKEN_ADDRESS ?? "") as `0x${string}`,
   dbPath: process.env.DB_PATH ?? DEFAULT_DB_PATH,
-  // Runtime-only (not from .env): set by the admin panel's pause/resume.
+  // Runtime-only (not from .env.bot): set by the admin panel's pause/resume.
   // Paused = keep scanning and logging, but never execute.
   paused: false,
   // Runtime-only: set by the admin panel's stop/start — deeper than paused.
