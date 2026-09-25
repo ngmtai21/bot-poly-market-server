@@ -19,6 +19,7 @@ const COMMAND_TTL_MS = 60_000;
 
 interface Settings extends Required<ConfigPatch> {
   paused: boolean;
+  running: boolean;
 }
 
 function currentSettings(): Settings {
@@ -28,6 +29,7 @@ function currentSettings(): Settings {
     maxOrderSizeUsdc: config.maxOrderSizeUsdc,
     enableTrading: config.enableTrading,
     paused: config.paused,
+    running: config.running,
   };
 }
 
@@ -37,6 +39,7 @@ function restore(s: Settings): void {
   config.maxOrderSizeUsdc = s.maxOrderSizeUsdc;
   config.enableTrading = s.enableTrading;
   config.paused = s.paused;
+  config.running = s.running;
 }
 
 // Settings changed from the admin panel persist across restarts and take
@@ -75,12 +78,36 @@ async function applyConfigPatch(client: ClobClient, patch: ConfigPatch): Promise
   }
 }
 
-async function runCommand(cmd: Command, db: Db, client: ClobClient, signer: WalletClient): Promise<unknown> {
+export interface Lifecycle {
+  // Deeper than pause/resume (config.paused): these actually tear down or
+  // rebuild the WebSocket/scan loop. onStart can fail (e.g. Gamma API
+  // unreachable) — the caller rolls config.running back on error.
+  onStop: () => void;
+  onStart: () => Promise<void>;
+}
+
+async function runCommand(cmd: Command, db: Db, client: ClobClient, signer: WalletClient, lifecycle: Lifecycle): Promise<unknown> {
   switch (cmd.type) {
     case "pause":
     case "resume":
       config.paused = cmd.type === "pause";
       setKv(db, SETTINGS_KEY, currentSettings());
+      return currentSettings();
+
+    case "stop":
+      if (config.running) {
+        lifecycle.onStop();
+        config.running = false;
+        setKv(db, SETTINGS_KEY, currentSettings());
+      }
+      return currentSettings();
+
+    case "start":
+      if (!config.running) {
+        await lifecycle.onStart(); // let it throw before persisting/flipping the flag
+        config.running = true;
+        setKv(db, SETTINGS_KEY, currentSettings());
+      }
       return currentSettings();
 
     case "set_config":
@@ -105,11 +132,11 @@ async function runCommand(cmd: Command, db: Db, client: ClobClient, signer: Wall
   }
 }
 
-async function processCommand(row: CommandRow, db: Db, client: ClobClient, signer: WalletClient): Promise<void> {
+async function processCommand(row: CommandRow, db: Db, client: ClobClient, signer: WalletClient, lifecycle: Lifecycle): Promise<void> {
   try {
     if (Date.now() - Date.parse(row.createdAt) > COMMAND_TTL_MS) throw new Error("expired: queued while bot was offline");
     const cmd = validateCommand(row.type, JSON.parse(row.payload));
-    const result = await runCommand(cmd, db, client, signer);
+    const result = await runCommand(cmd, db, client, signer, lifecycle);
     finishCommand(db, row.id, "done", result);
     logger.info(`Admin command ${row.id} (${row.type}) done`, result);
   } catch (err) {
@@ -124,8 +151,9 @@ export function startControlLoop(deps: {
   client: ClobClient;
   signer: WalletClient;
   status: () => Record<string, unknown>;
+  lifecycle: Lifecycle;
 }): void {
-  const { db, client, signer } = deps;
+  const { db, client, signer, lifecycle } = deps;
   let busy = false;
 
   const writeStatus = () =>
@@ -138,7 +166,7 @@ export function startControlLoop(deps: {
     busy = true;
     try {
       const rows = pendingCommands(db);
-      for (const row of rows) await processCommand(row, db, client, signer);
+      for (const row of rows) await processCommand(row, db, client, signer, lifecycle);
       if (rows.length) writeStatus(); // so the UI sees the new state right away
     } finally {
       busy = false;

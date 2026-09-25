@@ -12,6 +12,7 @@ A Polymarket within-market arbitrage bot plus a web admin panel. For a binary ma
 npm run scan              # trading bot (process 1): live orderbooks -> detect -> execute; holds the key
 npm run admin             # admin panel (process 2): HTTP API + static UI in web/; never loads the key
 npm run setup-api-key     # one-time: derive CLOB API creds from PRIVATE_KEY, paste into .env
+npm run setup-admin       # bootstrap the first admin login + optional wallet-key-rotation keypair (interactive; non-interactive via ADMIN_USERNAME/ADMIN_PASSWORD/ADMIN_GENERATE_ROTATION_KEYS env vars — see src/scripts/setup-admin.ts)
 npm run status            # is the bot alive (heartbeat in SQLite), latest opportunity
 npm run analyze           # summary from SQLite (same summarize() as the dashboard)
 npm run self-test         # assert-based logic tests (margin/fee/sizing, ledger, command validation)
@@ -31,9 +32,11 @@ npm run lint              # eslint src (includes the admin import restriction)
 
 [src/db.ts](src/db.ts) — schema + all read/write helpers, shared by both processes (must never import config.ts). Tables: `opportunities` (every detected opportunity + `reason`: dry-run | paused | below-execute-threshold | unsizeable | executed), `trades` (real executions: filled | both_failed | partial_unwound | partial_unwind_failed), `positions` (ledger: a `filled` trade upserts by conditionId; cleared by `markRedeemed`), `commands` (admin→bot queue), `kv` (`status` heartbeat, `settings` overrides). `summarize()` is the single P&L aggregation used by both `npm run analyze` and `/api/summary`.
 
-[src/commands.ts](src/commands.ts) — `validateCommand()` for `set_config | pause | resume | redeem`, run by the admin (early reject) **and** the bot (the real trust boundary). UI-settable `maxOrderSizeUsdc` capped at `MAX_ORDER_SIZE_CEILING_USDC`.
+[src/commands.ts](src/commands.ts) — `validateCommand()` for `set_config | pause | resume | stop | start | redeem`, run by the admin (early reject) **and** the bot (the real trust boundary). UI-settable `maxOrderSizeUsdc` capped at `MAX_ORDER_SIZE_CEILING_USDC`.
 
 [src/control.ts](src/control.ts) — bot side: executes commands, rejects ones older than 60s (queued while the bot was down), writes status every 5s and right after each command. `set_config` re-runs `assertTradingReady()` whenever the result is live and rolls the whole patch back on failure. Admin-changed settings persist in `kv.settings` and **override .env** at startup (`applySavedSettings`, logged).
+
+**`stop`/`start` vs `pause`/`resume`** — deliberately different depths, both purely event-driven (no pm2/OS involvement was tried and reverted; see STRATEGY.md for why). `pause` (`config.paused`) is shallow: WS stays connected and scanning, only `executeArb()` skips real execution. `stop`/`start` (`config.running`) is deep: `control.ts` takes a `Lifecycle { onStop, onStart }` from `scan.ts` — `onStop` calls `store.close()` and clears the resync interval (tears the WS down entirely, only the 1s command poll survives to hear a future `start`); `onStart` reruns the whole `fetchActiveMarkets()` → `OrderbookStore` → `connect()` sequence from scratch and can throw (e.g. Gamma unreachable), which rolls `config.running` back via the same before/restore pattern as `set_config`. Persisted like every other setting, so a crash-restart (pm2's `autorestart`, its only remaining job) boots idle if an operator last stopped it — never silently reconnects against their wishes.
 
 ## Trading pipeline (bot process)
 

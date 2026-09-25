@@ -13,6 +13,7 @@
     "self-test": "tsx --disable-warning=ExperimentalWarning src/scripts/self-test.ts",
     "integration-test": "tsx --disable-warning=ExperimentalWarning src/scripts/integration-test.ts",
     "redeem": "tsx src/scripts/redeem.ts",
+    "backup": "tsx --disable-warning=ExperimentalWarning src/scripts/backup-db.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src"
   },

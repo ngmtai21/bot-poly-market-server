@@ -107,6 +107,7 @@ input:focus, select:focus { outline: none; border-color: var(--blue); }
 
 /* controls */
 .control-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.btn-group { display: flex; gap: 6px; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; align-items: end; }
 .settings label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12px; }
 .settings button { grid-column: 1 / -1; }

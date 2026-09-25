@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { sendAlert } from "./alerts.js";
 
 // Shared by the bot process (writer) and the admin API process (reader +
 // command writer). Must never import config.ts or anything touching
@@ -86,8 +87,38 @@ export function openDb(path: string): Db {
       role TEXT NOT NULL CHECK (role IN ('admin', 'guest')),
       created_at TEXT NOT NULL
     );
+
+    -- Who did what, when. Separate from the commands table (bot-executed
+    -- actions) since this also covers account/session events that never
+    -- reach the bot (logins, user management).
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY,
+      ts TEXT NOT NULL,
+      username TEXT,
+      action TEXT NOT NULL,
+      detail TEXT,
+      ip TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
   `);
   return db;
+}
+
+export interface AuditEntry {
+  username: string | null;
+  action: string;
+  detail?: unknown;
+  ip?: string | null;
+}
+
+export function recordAudit(db: Db, e: AuditEntry): void {
+  db.prepare(`INSERT INTO audit_log (ts, username, action, detail, ip) VALUES (?, ?, ?, ?, ?)`).run(
+    now(),
+    e.username,
+    e.action,
+    e.detail === undefined ? null : JSON.stringify(e.detail),
+    e.ip ?? null
+  );
 }
 
 export interface UserRow {
@@ -205,7 +236,13 @@ export function recordTrade(db: Db, t: TradeRow): void {
     t.detail === undefined ? null : JSON.stringify(t.detail)
   );
 
-  if (t.status !== "filled") return;
+  if (t.status !== "filled") {
+    const label = t.status === "both_failed" ? "❌ Both legs failed" : "⚠️ Partial fill unwind";
+    void sendAlert(
+      `${label}\nMarket: ${t.question}\nStatus: ${t.status}\nShares: ${t.shares}`
+    );
+    return;
+  }
   db.prepare(
     `INSERT INTO positions (condition_id, question, neg_risk, shares, cost, opened_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)

@@ -55,7 +55,7 @@ let token = sessionStorage.getItem(TOKEN_KEY) || "";
 function showLogin(error = "") {
   $("login").classList.remove("hidden");
   $("login-error").textContent = error;
-  $("login-token").focus();
+  $("login-username").focus();
 }
 
 async function api(path, options = {}) {
@@ -66,7 +66,7 @@ async function api(path, options = {}) {
   if (res.status === 401) {
     token = "";
     sessionStorage.removeItem(TOKEN_KEY);
-    showLogin("Token không đúng hoặc đã hết hạn.");
+    showLogin("Phiên đăng nhập không hợp lệ hoặc đã hết hạn.");
     throw new Error("unauthorized");
   }
   const body = await res.json().catch(() => ({}));
@@ -76,15 +76,23 @@ async function api(path, options = {}) {
 
 $("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  token = $("login-token").value.trim();
+  const username = $("login-username").value.trim();
+  const password = $("login-password").value;
   try {
-    await api("/api/status");
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    token = body.token;
     sessionStorage.setItem(TOKEN_KEY, token);
     $("login").classList.add("hidden");
-    $("login-token").value = "";
+    $("login-password").value = "";
     refresh();
   } catch (err) {
-    if (err.message !== "unauthorized") $("login-error").textContent = `Không kết nối được: ${err.message}`;
+    $("login-error").textContent = err.message;
   }
 });
 
@@ -122,6 +130,35 @@ async function sendCommand(type, payload, label) {
   toast(`${label}: bot chưa phản hồi sau 30s`, "bad");
 }
 
+// ---------- bot stop/start (deeper than pause/resume: tears down/rebuilds
+// the WebSocket + scan loop entirely) — same commands-queue path as every
+// other control action, not a direct OS/pm2 call. See STRATEGY.md. ----------
+function renderProcessControl(status) {
+  const el = $("process-state");
+  const [start, stop, restart] = [$("process-start"), $("process-stop"), $("process-restart")];
+  if (!status) {
+    el.textContent = "—";
+    start.disabled = stop.disabled = restart.disabled = true;
+    return;
+  }
+  const running = Boolean(status.running);
+  el.textContent = running
+    ? `Đang chạy${status.wsConnected ? " · WS OK" : " · WS đang kết nối lại"} · ${shares(status.tokensSubscribed)} token`
+    : "Đã dừng (idle) — chỉ chờ lệnh Start";
+  start.disabled = running;
+  stop.disabled = !running;
+  restart.disabled = !running;
+}
+
+$("process-start").addEventListener("click", () => sendCommand("start", {}, "Start"));
+$("process-stop").addEventListener("click", () => {
+  if (confirm("Dừng hẳn bot? Sẽ ngắt kết nối, không quét/trade cho tới khi Start lại.")) sendCommand("stop", {}, "Stop");
+});
+$("process-restart").addEventListener("click", async () => {
+  await sendCommand("stop", {}, "Restart (stop)");
+  await sendCommand("start", {}, "Restart (start)");
+});
+
 // ---------- tabs ----------
 let activeTab = "dashboard";
 $("tabs").addEventListener("click", (e) => {
@@ -147,6 +184,9 @@ function renderHeader({ status, online }) {
   if (!status) {
     badge.className = "badge";
     badge.textContent = "—";
+  } else if (status.running === false) {
+    badge.className = "badge paused";
+    badge.textContent = "STOPPED";
   } else if (status.paused) {
     badge.className = "badge paused";
     badge.textContent = "PAUSED";
@@ -379,7 +419,10 @@ async function refresh() {
   try {
     const st = await api("/api/status");
     renderHeader(st);
-    if (activeTab === "dashboard") renderDashboard(await api("/api/summary"), st);
+    if (activeTab === "dashboard") {
+      renderDashboard(await api("/api/summary"), st);
+      renderProcessControl(st.status);
+    }
     if (activeTab === "opportunities") {
       const reason = $("opp-reason").value;
       renderOpportunities(await api(`/api/opportunities?limit=300${reason ? `&reason=${encodeURIComponent(reason)}` : ""}`));

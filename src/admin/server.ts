@@ -17,9 +17,11 @@ import {
   countAdmins,
   deleteUser,
   updateUserPassword,
+  recordAudit,
 } from "../db.js";
 import { validateCommand } from "../commands.js";
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, type Role, type SessionPayload } from "../auth.js";
+import { sendAlert } from "../alerts.js";
 
 // Admin API + static UI, as a SEPARATE process from the trading bot:
 // - its event loop can't slow the bot's hot path, and
@@ -121,6 +123,12 @@ function userView(u: { id: number; username: string; role: Role; created_at: str
   return { id: u.id, username: u.username, role: u.role, createdAt: u.created_at };
 }
 
+function clientIp(req: IncomingMessage): string | null {
+  const fwd = req.headers["x-forwarded-for"];
+  if (typeof fwd === "string" && fwd) return fwd.split(",")[0].trim();
+  return req.socket.remoteAddress ?? null;
+}
+
 async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Promise<void> {
   const route = `${req.method} ${url.pathname}`;
 
@@ -135,10 +143,14 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
     if (typeof body.username !== "string" || typeof body.password !== "string") {
       return send(res, 400, { error: "username and password are required" });
     }
+    const ip = clientIp(req);
     const user = findUserByUsername(db, body.username);
     if (!user || !verifyPassword(body.password, user.password_hash)) {
+      recordAudit(db, { username: body.username, action: "login_failed", ip });
       return send(res, 401, { error: "invalid username or password" });
     }
+    recordAudit(db, { username: user.username, action: "login", ip });
+    void sendAlert(`🔑 Login: <b>${user.username}</b> (${user.role})${ip ? ` from ${ip}` : ""}`);
     const token = createSessionToken({ userId: user.id, username: user.username, role: user.role }, SESSION_SECRET);
     return send(res, 200, { token, username: user.username, role: user.role });
   }
@@ -164,6 +176,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
         return send(res, 400, { error: "newPassword must be at least 8 characters" });
       }
       updateUserPassword(db, user.id, hashPassword(body.newPassword));
+      recordAudit(db, { username: user.username, action: "change_password_self", ip: clientIp(req) });
       return send(res, 200, { ok: true });
     }
 
@@ -204,6 +217,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       }
     }
 
+
     // ---- User management (admin only) ----
     case "GET /api/users": {
       if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
@@ -230,8 +244,19 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
         return send(res, 400, { error: "username already exists" });
       }
       const id = createUser(db, body.username, hashPassword(body.password), body.role);
+      recordAudit(db, {
+        username: session.username,
+        action: "create_user",
+        detail: { targetUsername: body.username, role: body.role },
+        ip: clientIp(req),
+      });
       return send(res, 201, { id });
     }
+
+    // ---- Audit log (admin only) ----
+    case "GET /api/audit":
+      if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
+      return send(res, 200, db.prepare(`SELECT * FROM audit_log ORDER BY id DESC LIMIT ?`).all(limitParam(url)));
 
     default:
       break;
@@ -249,13 +274,20 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       return send(res, 400, { error: "cannot delete the last admin account" });
     }
     deleteUser(db, id);
+    recordAudit(db, {
+      username: session.username,
+      action: "delete_user",
+      detail: { targetUsername: target.username },
+      ip: clientIp(req),
+    });
     return send(res, 200, { ok: true });
   }
   const resetMatch = url.pathname.match(/^\/api\/users\/(\d+)\/reset-password$/);
   if (resetMatch && req.method === "POST") {
     if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
     const id = Number(resetMatch[1]);
-    if (!findUserById(db, id)) return send(res, 404, { error: "not found" });
+    const target = findUserById(db, id);
+    if (!target) return send(res, 404, { error: "not found" });
     let body: { password?: unknown };
     try {
       body = (await readJson(req)) as typeof body;
@@ -266,6 +298,12 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       return send(res, 400, { error: "password must be at least 8 characters" });
     }
     updateUserPassword(db, id, hashPassword(body.password));
+    recordAudit(db, {
+      username: session.username,
+      action: "reset_password",
+      detail: { targetUsername: target.username },
+      ip: clientIp(req),
+    });
     return send(res, 200, { ok: true });
   }
 
@@ -303,6 +341,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       out[f] = v;
     }
     setKv(db, "contractAddresses", out);
+    recordAudit(db, { username: session.username, action: "update_contract_addresses", detail: out, ip: clientIp(req) });
     return send(res, 200, out);
   }
 
@@ -340,6 +379,8 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
     ).toString("base64");
     body.privateKey = "";
     setKv(db, "stagedWalletKey", { ciphertext, stagedAt: new Date().toISOString() });
+    recordAudit(db, { username: session.username, action: "stage_wallet_key", ip: clientIp(req) });
+    void sendAlert(`🔐 Wallet key rotation staged by <b>${session.username}</b> — restart the bot to apply.`);
     return send(res, 200, { ok: true, note: "Staged — restart the bot process (npm run scan) to apply it." });
   }
 
@@ -368,6 +409,23 @@ async function handleStatic(res: ServerResponse, url: URL): Promise<void> {
 if (countAdmins(db) === 0) {
   console.warn("No admin account exists yet — run `npm run setup-admin` before logging in.");
 }
+
+// Offline watchdog: this process outlives the bot process, so it's the one
+// that can actually notice and alert when the bot stops sending heartbeats
+// — the bot obviously can't alert on its own crash. Alerts once per
+// transition, not on every tick, so a dead bot doesn't spam the chat.
+let lastKnownOnline = true;
+setInterval(() => {
+  const status = getKv<Record<string, unknown>>(db, "status");
+  const age = status ? Date.now() - Date.parse(String(status.heartbeat)) : null;
+  const online = age !== null && age < HEARTBEAT_STALE_MS;
+  if (lastKnownOnline && !online) {
+    void sendAlert(`🔴 Bot heartbeat lost (last seen ${age ? Math.round(age / 1000) : "?"}s ago).`);
+  } else if (!lastKnownOnline && online) {
+    void sendAlert(`🟢 Bot is back online.`);
+  }
+  lastKnownOnline = online;
+}, 10_000);
 
 createServer((req, res) => {
   // Bearer-token auth (no cookies), so reflecting the caller's Origin is

@@ -10,22 +10,35 @@ and the reasoning behind it.
 ## Setup
 
 1. `cp env.dist .env` and fill in `PRIVATE_KEY` (Polygon EOA wallet key —
-   never commit this) and `ADMIN_TOKEN` (see below).
+   never commit this) and `SESSION_SECRET` (see below).
 2. `npm install`
 3. `npm run setup-api-key` — derives CLOB API key/secret/passphrase; paste
    into `.env`.
-4. For live trading only: fund the Polymarket proxy wallet with USDC.e and
+4. `npm run setup-admin` — creates the first admin login (see "Admin panel").
+5. For live trading only: fund the Polymarket proxy wallet with USDC.e and
    keep some POL for gas (needed to redeem).
 
 ## Running
 
-Two separate processes, sharing one SQLite file (`data/bot.db`):
+Two separate processes, sharing one SQLite file (`data/bot.db`), started via
+[ecosystem.config.cjs](ecosystem.config.cjs):
 
 ```bash
-pm2 start "npm run scan"  --name polymarket-bot     # trading bot — holds the key
-pm2 start "npm run admin" --name polymarket-admin   # admin panel — never loads the key
-pm2 save
+pm2 start ecosystem.config.cjs   # first deploy
+pm2 save                         # persist across VPS reboots (also run: pm2 startup)
 ```
+
+After a `git pull` on the VPS to ship changes:
+
+```bash
+git pull
+npm install                       # if package.json changed
+pm2 reload ecosystem.config.cjs   # restarts both with the new code/.env
+```
+
+Single-service commands when you only need one:
+`pm2 restart polymarket-bot` / `pm2 restart polymarket-admin`,
+`pm2 logs polymarket-bot`, `pm2 status`.
 
 They're separate on purpose: the admin's HTTP traffic can't slow the bot's
 event loop, and a compromised web layer can't reach the wallet key. The
@@ -45,16 +58,33 @@ belt-and-suspenders guarantee under CPU pressure.
 
 ## Admin panel
 
-- Generate a token and put it in `.env` as `ADMIN_TOKEN` (≥ 24 chars):
-  `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`
+Username/password login, not a bearer token — accounts live in the shared
+SQLite db (`users` table, scrypt-hashed passwords, never in `.env` or
+plaintext anywhere).
+
+- Set `SESSION_SECRET` in `.env` (any random string — signs login sessions;
+  if left unset the process generates one at startup and warns, but every
+  session drops on restart).
+- Create the first account: `npm run setup-admin` — interactive by default
+  (prompts for username/password, optionally generates the wallet-key-
+  rotation keypair). Safe to re-run; skips creating a user that already
+  exists.
+- **Non-interactive** (deploy scripts/CI, where nothing can answer a
+  prompt): set `ADMIN_USERNAME` and run with `< /dev/null` or any closed/
+  piped stdin — it detects the non-TTY and never blocks on a prompt.
+  `ADMIN_PASSWORD` unset still auto-generates and prints one; a genuinely
+  missing `ADMIN_USERNAME` fails loudly (exit 1) instead of hanging.
+  ```bash
+  ADMIN_USERNAME=admin ADMIN_GENERATE_ROTATION_KEYS=yes npm run setup-admin
+  ```
 - It binds to `127.0.0.1:8787` by default — **don't expose it publicly**.
   From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>` then open
-  http://localhost:8787.
+  http://localhost:8787 and log in.
 
 Tabs:
 - **Dashboard** — P&L, opportunity counts by reason, bot health (heartbeat,
-  WS, books synced), and controls: enable/disable live trading, pause/resume,
-  change thresholds and order size.
+  WS, books synced), and controls: start/stop/restart the bot process,
+  enable/disable live trading, pause/resume, change thresholds and order size.
 - **Markets** — top 500 markets by 24h volume and a live YES/NO orderbook,
   loaded straight from Polymarket's public API/WebSocket by the browser.
 - **Opportunities / Trades / Positions / Commands** — everything the bot has
@@ -65,6 +95,22 @@ same balance/allowance preflight as startup (rolled back if it fails); order
 size is capped at $1000 from the UI; commands expire after 60s so a click
 made while the bot was down never fires hours later. Settings changed from
 the panel persist across restarts and **override `.env`** (logged at startup).
+
+**Every control action goes through one path, on purpose** (see
+[STRATEGY.md](STRATEGY.md) for the full model): the admin process only ever
+*requests* — it writes a command to a queue in SQLite. The bot process (the
+only one holding the wallet key) polls that queue, re-validates, and
+executes. The admin process has zero direct power over the OS process or
+the wallet, even if fully compromised.
+
+Start/Stop/Restart on the Dashboard is **not** OS-level process control —
+`pm2` keeps the bot process itself always running (crash-recovery via
+`autorestart`). "Stop" is an event the bot acts on by disconnecting its
+WebSocket and idling down to just its 1s command poll (so it can still hear
+a future "start"); "pause" (different button) is shallower — it stays fully
+connected and scanning, only skipping trade execution. The stopped/running
+choice is persisted, so a crash-restart resumes in whatever state the
+operator last left it in rather than silently reconnecting.
 
 ## Checking the pipeline
 

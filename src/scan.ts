@@ -78,85 +78,121 @@ async function main() {
 
   await assertTradingReady(client);
 
-  const markets = await fetchActiveMarkets();
-  logger.info(`Loaded ${markets.length} active markets, subscribing to orderbooks...`);
-
-  const byTokenId = new Map<string, MarketInfo>();
-  const tokenIds: string[] = [];
-
-  for (const m of markets) {
-    const [yesTokenId, noTokenId] = JSON.parse(m.clobTokenIds) as [string, string];
-    const info: MarketInfo = {
-      conditionId: m.conditionId,
-      question: m.question,
-      yesTokenId,
-      noTokenId,
-      liquidityNum: m.liquidityNum,
-      volumeNum: m.volumeNum,
-      negRisk: m.negRisk,
-    };
-    byTokenId.set(yesTokenId, info);
-    byTokenId.set(noTokenId, info);
-    tokenIds.push(yesTokenId, noTokenId);
-  }
-
   // Guards against re-entering executeArb for the same market while a
-  // previous attempt on it is still in flight.
+  // previous attempt on it is still in flight. Lives across stop/start
+  // cycles — harmless if a stray in-flight promise resolves after a stop.
   const inFlight = new Set<string>();
   let bookUpdates = 0;
 
-  const store = new OrderbookStore(tokenIds, (updatedTokenId) => {
-    bookUpdates++;
-    const info = byTokenId.get(updatedTokenId);
-    if (!info || inFlight.has(info.conditionId)) return;
+  // Mutable scan session state — null/0 while stopped (config.running ===
+  // false). Rebuilt from scratch on every start so the market list is
+  // always current, not whatever it was when the bot last connected.
+  let store: OrderbookStore | null = null;
+  let resyncInterval: ReturnType<typeof setInterval> | null = null;
+  let tokenCount = 0;
+  let marketsLoaded = 0;
 
-    const yesAsk = store.getBestAsk(info.yesTokenId);
-    const noAsk = store.getBestAsk(info.noTokenId);
-    if (yesAsk == null || noAsk == null) return;
+  async function connectAndScan(): Promise<void> {
+    const markets = await fetchActiveMarkets();
+    logger.info(`Loaded ${markets.length} active markets, subscribing to orderbooks...`);
 
-    // Cheap pre-filter before the fee-rate lookup: skip anything that isn't
-    // even profitable before fees.
-    const rawMargin = 1 - (yesAsk + noAsk);
-    if (rawMargin <= 0) return;
+    const byTokenId = new Map<string, MarketInfo>();
+    const tokenIds: string[] = [];
 
-    inFlight.add(info.conditionId);
-    computeNetMargin(client, info.yesTokenId, info.noTokenId, yesAsk, noAsk)
-      .then((margin) => {
-        if (margin <= config.minProfitMargin) return;
+    for (const m of markets) {
+      const [yesTokenId, noTokenId] = JSON.parse(m.clobTokenIds) as [string, string];
+      const info: MarketInfo = {
+        conditionId: m.conditionId,
+        question: m.question,
+        yesTokenId,
+        noTokenId,
+        liquidityNum: m.liquidityNum,
+        volumeNum: m.volumeNum,
+        negRisk: m.negRisk,
+      };
+      byTokenId.set(yesTokenId, info);
+      byTokenId.set(noTokenId, info);
+      tokenIds.push(yesTokenId, noTokenId);
+    }
 
-        const yesBook = store.getBook(info.yesTokenId);
-        const noBook = store.getBook(info.noTokenId);
-        if (!yesBook || !noBook) return;
+    const newStore: OrderbookStore = new OrderbookStore(
+      tokenIds,
+      (updatedTokenId) => {
+        bookUpdates++;
+        const info = byTokenId.get(updatedTokenId);
+        if (!info || inFlight.has(info.conditionId)) return;
 
-        const opp = { ...info, yesAsk, noAsk, margin };
-        const shares = sizeOpportunity(opp, yesBook, noBook);
+        const yesAsk = newStore.getBestAsk(info.yesTokenId);
+        const noAsk = newStore.getBestAsk(info.noTokenId);
+        if (yesAsk == null || noAsk == null) return;
 
-        logger.info(
-          `[ARB] ${info.question} | YES=${yesAsk} NO=${noAsk} netMargin=${margin.toFixed(4)} shares=${shares.toFixed(2)}`
-        );
+        // Cheap pre-filter before the fee-rate lookup: skip anything that
+        // isn't even profitable before fees.
+        const rawMargin = 1 - (yesAsk + noAsk);
+        if (rawMargin <= 0) return;
 
-        return executeArb(client, db, opp, shares);
-      })
-      .catch((err) => logger.error("Opportunity handling threw", { question: info.question, err }))
-      .finally(() => inFlight.delete(info.conditionId));
-  }, () => void loadSnapshots());
+        inFlight.add(info.conditionId);
+        computeNetMargin(client, info.yesTokenId, info.noTokenId, yesAsk, noAsk)
+          .then((margin) => {
+            if (margin <= config.minProfitMargin) return;
 
-  const loadSnapshots = snapshotLoader(client, store, tokenIds);
-  store.connect();
-  setInterval(() => void loadSnapshots(), RESYNC_INTERVAL_MS);
+            const yesBook = newStore.getBook(info.yesTokenId);
+            const noBook = newStore.getBook(info.noTokenId);
+            if (!yesBook || !noBook) return;
+
+            const opp = { ...info, yesAsk, noAsk, margin };
+            const shares = sizeOpportunity(opp, yesBook, noBook);
+
+            logger.info(
+              `[ARB] ${info.question} | YES=${yesAsk} NO=${noAsk} netMargin=${margin.toFixed(4)} shares=${shares.toFixed(2)}`
+            );
+
+            return executeArb(client, db, opp, shares);
+          })
+          .catch((err) => logger.error("Opportunity handling threw", { question: info.question, err }))
+          .finally(() => inFlight.delete(info.conditionId));
+      },
+      () => void loadSnapshots()
+    );
+
+    const loadSnapshots = snapshotLoader(client, newStore, tokenIds);
+    newStore.connect();
+
+    store = newStore;
+    tokenCount = tokenIds.length;
+    marketsLoaded = markets.length;
+    resyncInterval = setInterval(() => void loadSnapshots(), RESYNC_INTERVAL_MS);
+  }
+
+  function disconnectAndIdle(): void {
+    store?.close();
+    if (resyncInterval) clearInterval(resyncInterval);
+    store = null;
+    resyncInterval = null;
+    tokenCount = 0;
+    marketsLoaded = 0;
+    logger.info("Bot stopped — WebSocket disconnected, scanning idle. Waiting for a start command.");
+  }
+
+  // config.running was already restored (if persisted) by applySavedSettings
+  // above — an operator-initiated stop survives a crash/restart, so the bot
+  // doesn't silently resume trading against their wishes.
+  if (config.running) await connectAndScan();
+  else logger.info("Starting idle — bot was stopped from the admin panel before this restart.");
 
   const startedAt = new Date().toISOString();
   startControlLoop({
     db,
     client,
     signer,
+    lifecycle: { onStop: disconnectAndIdle, onStart: connectAndScan },
     status: () => ({
       startedAt,
-      marketsLoaded: markets.length,
-      wsConnected: store.isConnected(),
+      marketsLoaded,
+      wsConnected: store?.isConnected() ?? false,
       bookUpdates,
-      booksSynced: store.syncedCount(),
-      tokensSubscribed: tokenIds.length,
+      booksSynced: store?.syncedCount() ?? 0,
+      tokensSubscribed: tokenCount,
       walletAddress: signer.account!.address,
       redeemConfigured: Boolean(config.ctfAdapterAddress && config.negRiskCtfAdapterAddress && config.collateralTokenAddress),
     }),

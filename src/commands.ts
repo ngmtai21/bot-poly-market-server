@@ -14,6 +14,13 @@ export type Command =
   | { type: "set_config"; payload: ConfigPatch }
   | { type: "pause"; payload: Record<string, never> }
   | { type: "resume"; payload: Record<string, never> }
+  // stop/start are deeper than pause/resume: pause still keeps the
+  // WebSocket connected and scanning (only trade execution is skipped);
+  // stop tears the connection down entirely and idles the bot down to just
+  // its 1s command poll, so it can still hear a future "start". Pure
+  // event-driven — no pm2/OS-level involvement (see README/STRATEGY).
+  | { type: "stop"; payload: Record<string, never> }
+  | { type: "start"; payload: Record<string, never> }
   | { type: "redeem"; payload: { conditionId: string; negRisk: boolean } };
 
 // Hard ceiling on per-trade size settable from the UI — a typo like 50000
@@ -29,6 +36,8 @@ export function validateCommand(type: unknown, payload: unknown): Command {
   switch (type) {
     case "pause":
     case "resume":
+    case "stop":
+    case "start":
       return { type, payload: {} };
 
     case "redeem": {

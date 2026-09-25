@@ -9,22 +9,53 @@ import { hashPassword } from "../auth.js";
 // into .env yourself. Safe to re-run: creating an admin is skipped if the
 // username already exists; the rotation keypair is only (re)generated on
 // request.
+//
+// Non-interactive mode (for deploy scripts/CI, where nothing can type into
+// a readline prompt): set ADMIN_USERNAME (and optionally ADMIN_PASSWORD,
+// ADMIN_GENERATE_ROTATION_KEYS=yes) as env vars and this skips every
+// prompt it has an answer for. Example:
+//   ADMIN_USERNAME=admin ADMIN_GENERATE_ROTATION_KEYS=yes npm run setup-admin
+// A password left unset still auto-generates and prints, same as pressing
+// enter interactively.
+//
+// Whether to prompt at all is decided by `process.stdin.isTTY`, not just
+// "is the value missing" — a readline prompt against a non-TTY stream
+// (piped/redirected stdin, the normal case for a deploy script) can sit
+// forever on a pending question that no 'line' event will ever answer,
+// and since nothing else is keeping the event loop alive, Node exits 0
+// having silently done nothing. Anything required but missing outside a
+// TTY must fail loudly instead of prompting into a stream that can't answer.
+
+function truthy(v: string | undefined): boolean {
+  return ["1", "y", "yes", "true"].includes((v ?? "").trim().toLowerCase());
+}
 
 async function main() {
   const dbPath = process.env.DB_PATH ?? DEFAULT_DB_PATH;
   const db = openDb(dbPath);
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const interactive = process.stdin.isTTY === true;
+
+  const envUsername = process.env.ADMIN_USERNAME?.trim();
+  const envPassword = process.env.ADMIN_PASSWORD?.trim();
+  const envGenKeys = process.env.ADMIN_GENERATE_ROTATION_KEYS;
+
+  let rl: ReturnType<typeof createInterface> | undefined;
+  const ask = async (question: string): Promise<string> => {
+    if (!interactive) throw new Error(`stdin is not a TTY — cannot prompt for: ${question.trim()}`);
+    if (!rl) rl = createInterface({ input: process.stdin, output: process.stdout });
+    return (await rl.question(question)).trim();
+  };
 
   try {
-    console.log(`Using db: ${dbPath}\n`);
+    console.log(`Using db: ${dbPath}${interactive ? "" : " (non-interactive mode)"}\n`);
 
     console.log("== Admin account ==");
-    const username = (await rl.question("Admin username: ")).trim();
+    const username = envUsername || (await ask("Admin username: "));
     if (!username) throw new Error("username required");
     if (findUserByUsername(db, username)) {
       console.log(`User "${username}" already exists — skipping account creation.`);
     } else {
-      const password = (await rl.question("Admin password (leave empty to auto-generate): ")).trim();
+      const password = envPassword || (interactive ? await ask("Admin password (leave empty to auto-generate): ") : "");
       const finalPassword = password || randomBytes(9).toString("base64url");
       createUser(db, username, hashPassword(finalPassword), "admin");
       console.log(`\nCreated admin "${username}".`);
@@ -32,8 +63,8 @@ async function main() {
     }
 
     console.log("\n== Wallet key rotation keypair ==");
-    const genKeys = (await rl.question("Generate/replace the RSA rotation keypair? (y/N): ")).trim().toLowerCase();
-    if (genKeys === "y" || genKeys === "yes") {
+    const genKeys = envGenKeys !== undefined || !interactive ? truthy(envGenKeys) : truthy(await ask("Generate/replace the RSA rotation keypair? (y/N): "));
+    if (genKeys) {
       const { publicKey, privateKey } = generateKeyPairSync("rsa", {
         modulusLength: 4096,
         publicKeyEncoding: { type: "spki", format: "pem" },
@@ -48,7 +79,7 @@ async function main() {
       console.log("Skipped — wallet key rotation from the admin panel stays disabled until you run this again.");
     }
   } finally {
-    rl.close();
+    rl?.close();
   }
 }
 

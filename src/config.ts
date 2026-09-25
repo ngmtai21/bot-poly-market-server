@@ -32,4 +32,10 @@ export const config = {
   // Runtime-only (not from .env): set by the admin panel's pause/resume.
   // Paused = keep scanning and logging, but never execute.
   paused: false,
+  // Runtime-only: set by the admin panel's stop/start — deeper than paused.
+  // false = WebSocket disconnected, no scanning at all; only the 1s command
+  // poll keeps running (see control.ts/scan.ts). Defaults true so a fresh
+  // boot (or a crash-restart) scans normally unless an operator explicitly
+  // stopped it — that choice is persisted and restored (applySavedSettings).
+  running: true,
 };

@@ -113,4 +113,45 @@ server trước**. Đây là lý do:
   tiền, nên nhiều vị thế nhỏ không đáng công với họ nhưng đáng với bot chi
   phí vận hành gần bằng 0 như bot này).
 
+## Mô hình điều khiển: admin panel và bot giao tiếp qua sự kiện, không qua pm2
+
+2 process tách biệt, chung 1 file SQLite (`data/bot.db`), không gọi thẳng
+nhau qua HTTP/socket:
+
+```
+Admin (không giữ private key)         Bot (giữ private key, thực thi)
+       │                                       │
+  Ghi 1 dòng vào bảng "commands" ────► poll mỗi 1s, validate lại,
+  (set_config / pause / resume /        thực thi, ghi kết quả ngược lại
+   stop / start / redeem)                       │
+       │                                       │
+       └──────────── data/bot.db (SQLite, WAL) ─┘
+```
+
+**Nguyên tắc cốt lõi**: admin **chỉ được phép "yêu cầu"**, không bao giờ tự
+thực thi trực tiếp — kể cả với `stop`/`start`. Điều này khác với thiết kế
+ban đầu (đã thử rồi bỏ): admin gọi thẳng API của pm2 để start/stop tiến
+trình OS. Lý do bỏ: phá vỡ ranh giới tin cậy duy nhất của hệ thống (admin
+không có quyền hành động, chỉ có quyền yêu cầu) chỉ để tiện, trong khi
+mô hình event thuần nhất quán hơn và admin không cần thêm quyền hạn nào.
+
+**`stop`/`start` khác `pause`/`resume` thế nào**:
+- `pause`/`resume` — nông: vẫn giữ WebSocket kết nối, vẫn quét orderbook
+  bình thường, chỉ bỏ qua bước đặt lệnh thật.
+- `stop`/`start` — sâu hơn: `stop` khiến bot **ngắt hẳn WebSocket, dừng
+  quét hoàn toàn**, chỉ giữ lại vòng lặp nhẹ (poll bảng `commands` mỗi
+  1 giây) để còn "nghe" được lệnh `start` trong tương lai. `start` build
+  lại toàn bộ: tải lại danh sách market, mở lại WebSocket, quét từ đầu.
+
+**Giới hạn vật lý phải chấp nhận**: nếu tiến trình OS của bot thật sự chết
+hẳn (crash, hoặc bị `pm2 stop` từ tầng hệ điều hành), nó không còn sống để
+đọc bất kỳ event nào — event-queue chỉ hoạt động khi có ít nhất 1 bên đang
+chạy để lắng nghe. `pm2` vẫn giữ vai trò **duy nhất**: tự khởi động lại
+tiến trình nếu nó crash thật (`autorestart`), không liên quan gì tới việc
+điều khiển stop/start theo ý người vận hành — 2 việc này tách bạch hoàn
+toàn. Trạng thái `running` (đã `stop` hay chưa) được lưu lại, nên nếu pm2
+phải khởi động lại do crash, bot boot lên **đúng trạng thái người vận hành
+để lại** (nếu đã `stop` trước đó, boot lên ở chế độ idle, không tự ý kết
+nối lại) thay vì âm thầm đè lên quyết định của operator.
+
 Xem [README.md](README.md) để biết trạng thái hiện tại và cách dùng admin panel.
