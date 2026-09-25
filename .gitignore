@@ -1,7 +1,6 @@
 node_modules
 dist
 .env
-.env.bot
 .env.admin
 data/
 backups/

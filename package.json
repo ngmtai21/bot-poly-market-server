@@ -4,35 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "setup-api-key": "tsx src/scripts/setup-api-key.ts",
     "setup-admin": "tsx src/scripts/setup-admin.ts",
-    "scan": "nice -n -5 tsx --disable-warning=ExperimentalWarning src/scan.ts",
     "admin": "nice -n 10 tsx --disable-warning=ExperimentalWarning src/admin/server.ts",
     "analyze": "tsx --disable-warning=ExperimentalWarning src/scripts/analyze.ts",
     "status": "tsx --disable-warning=ExperimentalWarning src/scripts/status.ts",
-    "self-test": "tsx --disable-warning=ExperimentalWarning src/scripts/self-test.ts",
-    "integration-test": "tsx --disable-warning=ExperimentalWarning src/scripts/integration-test.ts",
-    "redeem": "tsx src/scripts/redeem.ts",
     "backup": "tsx --disable-warning=ExperimentalWarning src/scripts/backup-db.ts",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src"
   },
   "dependencies": {
-    "@polymarket/clob-client": "^5.8.1",
-    "dotenv": "^16.4.5",
-    "viem": "^2.46.3",
-    "ws": "^8.21.3"
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.9.0",
-    "@types/ws": "^8.5.13",
     "eslint": "^10.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.70.0"
-  },
-  "overrides": {
-    "ws": "^8.21.3"
   }
 }

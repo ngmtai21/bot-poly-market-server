@@ -6,7 +6,7 @@ import { hashPassword } from "../auth.js";
 // Run once (`npm run setup-admin`) to bootstrap the first admin account and
 // the wallet-key-rotation keypair. Nothing here ever touches PRIVATE_KEY —
 // it only writes to the shared SQLite db and prints values for you to copy
-// into .env.bot yourself. Safe to re-run: creating an admin is skipped if the
+// into ../bot/.env.bot yourself. Safe to re-run: creating an admin is skipped if the
 // username already exists; the rotation keypair is only (re)generated on
 // request.
 //
@@ -72,7 +72,7 @@ async function main() {
       });
       setKv(db, "walletKeyPublicKey", publicKey);
       console.log("\nPublic key stored in the db (the admin panel uses it to encrypt a new wallet key).");
-      console.log("\nAdd this to the BOT process's .env.bot ONLY (never the admin process's .env.admin):\n");
+      console.log("\nAdd this to the BOT process's ../bot/.env.bot ONLY (never this repo's .env.admin):\n");
       console.log(`WALLET_KEY_DECRYPT_PRIVATE_KEY=${Buffer.from(privateKey).toString("base64")}\n`);
       console.log("Without this, the bot ignores any key staged from the admin panel and keeps using .env.bot's PRIVATE_KEY.");
     } else {

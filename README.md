@@ -1,96 +1,88 @@
-# Polymarket arbitrage bot
+# Polymarket arbitrage bot — admin API
 
-Detects within-market arbitrage on Polymarket: for a binary market, if
-`YES ask + NO ask < 1` (after fees), buying both sides locks in a profit
-regardless of outcome. Includes a web admin panel to monitor and control it.
+Admin control panel API for the [bot](../bot) that detects within-market
+arbitrage on Polymarket: for a binary market, if `YES ask + NO ask < 1`
+(after fees), buying both sides locks in a profit regardless of outcome.
 
-See [STRATEGY.md](STRATEGY.md) for a diagrammed walkthrough of the pipeline
-and the reasoning behind it.
+This repo is **admin-only** — a pure JSON HTTP API, no UI served here. The
+bot itself (the process holding `PRIVATE_KEY`, actually trading) lives in
+the sibling [`../bot`](../bot) repo. See [`../bot/STRATEGY.md`](../bot/STRATEGY.md)
+for the strategy walkthrough.
 
 ## Setup
 
-Two separate env files, one per process — **not just organizational**: the
-bot's file is the only place `PRIVATE_KEY` ever lives, and the admin
-process never loads it (see "Two env files" below).
-
-1. `cp env.bot.dist .env.bot` and fill in `PRIVATE_KEY` (Polygon EOA wallet
-   key — never commit this).
-   `cp env.admin.dist .env.admin` and fill in `SESSION_SECRET`.
+1. `cp env.admin.dist .env.admin` and fill in `SESSION_SECRET`, `DB_PATH`
+   (must point at the same `data/bot.db` the bot repo uses).
 2. `npm install`
-3. `npm run setup-api-key` — derives CLOB API key/secret/passphrase; paste
-   into `.env.bot`.
-4. `npm run setup-admin` — creates the first admin login (see "Admin API").
-5. For live trading only: fund the Polymarket proxy wallet with USDC.e and
-   keep some POL for gas (needed to redeem).
+3. `npm run setup-admin` — creates the first admin login (see "Admin API").
 
-## Two env files
+## Deploying to a VPS
 
-`config.ts` (bot) loads `.env.bot` explicitly; `admin/server.ts` loads
-`.env.admin` explicitly — neither falls back to a shared/ambiguous `.env`.
-This is enforced by which file physically contains which variables, not
-just by runtime filtering (though the admin process also keeps a private
-copy of what it reads, as defense in depth):
+This repo doesn't need the `../bot` repo present to run — it only needs to
+read the same `data/bot.db` file, wherever that lives. Simplest is cloning
+both repos as siblings on the VPS (matches `DB_PATH=data/bot.db` relative
+paths in both `.env` files), but any layout works as long as `DB_PATH` in
+`.env.admin` and in the bot's `.env.bot` resolve to the same file.
 
-| | `.env.bot` | `.env.admin` |
-|---|---|---|
-| `PRIVATE_KEY`, `WALLET_KEY_DECRYPT_PRIVATE_KEY` | ✓ | never |
-| `CLOB_API_*`, `CTF_*`/`COLLATERAL_TOKEN_ADDRESS` | ✓ | never |
-| Trading thresholds, `ENABLE_TRADING` | ✓ | never |
-| `DB_PATH` | ✓ (must match) | ✓ (must match) |
-| `SESSION_SECRET`, `ADMIN_HOST`, `ADMIN_PORT` | never | ✓ |
-| `TELEGRAM_BOT_TOKEN`/`CHAT_ID` | ✓ (bot-side alerts) | ✓ (admin-side alerts) |
-| `BACKUP_DIR`/`BACKUP_KEEP` | ✓ | never |
+```bash
+# on the VPS, once:
+git clone <this-repo-url> server && cd server
+npm install -g pm2   # if not already installed
+cp env.admin.dist .env.admin
+# fill in SESSION_SECRET (see "Admin API" below), ADMIN_HOST/PORT, DB_PATH
+npm install
+npm run setup-admin   # creates the first admin login
 
-Both `.env.bot` and `.env.admin` are gitignored. `npm run setup-admin` and
-the one-off scripts (`setup-api-key`, `backup`, `status`, `analyze`,
-`redeem`, `integration-test`) all read `.env.bot` (they need `DB_PATH` and,
-for most of them, transitively import `config.ts`).
+pm2 start ecosystem.config.cjs
+pm2 save               # persist across reboots
+pm2 startup            # follow its printed instructions once, for cold boots
+```
+
+Shipping a change after that:
+
+```bash
+git pull
+npm install                       # only if package.json changed
+pm2 reload ecosystem.config.cjs   # zero-downtime restart with new code/env
+```
+
+The API binds to `127.0.0.1:8787` only — reach it from your laptop via
+`ssh -L 8787:127.0.0.1:8787 root@<vps>`, never by opening the port publicly
+(see "Admin API" below).
+
+## Two repos, one SQLite file
+
+`admin/server.ts` loads `.env.admin` explicitly — it never touches
+`PRIVATE_KEY`, which lives only in `../bot/.env.bot`. Physical separation
+(different files, different repos) is the primary defense; the admin
+process also keeps a private copy of what it reads (`processEnv: {}`) as
+defense in depth.
+
+`db.ts`, `commands.ts`, `logger.ts`, and `alerts.ts` are duplicated between
+this repo and `../bot`, kept in sync by hand — see CLAUDE.md for why.
 
 ## Running
-
-Two separate processes, sharing one SQLite file (`data/bot.db`), started via
-[ecosystem.config.cjs](ecosystem.config.cjs):
 
 ```bash
 pm2 start ecosystem.config.cjs   # first deploy
 pm2 save                         # persist across VPS reboots (also run: pm2 startup)
 ```
 
-After a `git pull` on the VPS to ship changes:
+After a `git pull` to ship changes: `npm install` (if `package.json`
+changed) then `pm2 reload ecosystem.config.cjs`. Single-service commands:
+`pm2 restart polymarket-admin`, `pm2 logs polymarket-admin`, `pm2 status`.
 
-```bash
-git pull
-npm install                       # if package.json changed
-pm2 reload ecosystem.config.cjs   # restarts both with the new code/env files
-```
-
-Single-service commands when you only need one:
-`pm2 restart polymarket-bot` / `pm2 restart polymarket-admin`,
-`pm2 logs polymarket-bot`, `pm2 status`.
-
-They're separate on purpose: the admin's HTTP traffic can't slow the bot's
-event loop, and a compromised web layer can't reach the wallet key. The
-admin only queues commands in SQLite; the bot re-validates and executes
-them.
-
-**The bot's speed is never traded off for the admin panel.** Two separate
-Node processes means separate event loops — admin HTTP handling cannot
-delay the bot's WS message processing regardless of load. At the SQLite
-layer (WAL mode), this was measured directly: a reader hammering
-`summarize()` in a tight loop (~5000 calls/sec — far past anything the
-5s-polling UI generates) left the bot's write latency unchanged (p99
-0.33ms → 0.31ms). `npm run scan` also runs at a higher OS scheduling
-priority than `npm run admin` (`nice -n -5` vs `-n 10` — needs root, which
-the VPS runs as; degrades harmlessly to normal priority otherwise) as a
-belt-and-suspenders guarantee under CPU pressure.
+Runs at normal OS priority (`nice -n 10`) so it never contends with the
+bot's `nice -n -5` scan loop for CPU — the two are separate processes with
+separate event loops regardless.
 
 ## Admin API
 
-Pure JSON API, no UI served from this repo — the admin-page frontend is a
-separate project that calls this API over HTTP from its own origin (dev
-server or static host). CORS reflects the caller's `Origin` dynamically and
-auth is bearer-token (not cookies), so this is safe by design: see
-`src/admin/server.ts`'s CORS comment.
+Pure JSON API — the admin-page frontend is a separate project that calls
+this API over HTTP from its own origin (dev server or static host). CORS
+reflects the caller's `Origin` dynamically and auth is bearer-token (not
+cookies), so that's safe by design: see `src/admin/server.ts`'s CORS
+comment.
 
 Username/password login, not a static bearer token — accounts live in the
 shared SQLite db (`users` table, scrypt-hashed passwords, never in any env
@@ -127,116 +119,44 @@ Endpoints (all under `/api/`, all but login require `Authorization: Bearer
 - `POST auth/change-password` — any logged-in user, own account.
 - `GET/PUT config/addresses` — the redeem contract addresses (view: any
   role, edit: admin only).
-- `GET wallet/rotation-status`, `POST wallet/stage-key` — see "Rotating the
-  wallet key" below.
+- `GET wallet/rotation-status`, `POST wallet/stage-key` — see the bot
+  repo's README, "Rotating the wallet key".
 
 Control safety: `set_config { enableTrading: true }` requires the bot to
 re-pass the same balance/allowance preflight as startup (rolled back if it
 fails); `maxOrderSizeUsdc` is capped at `MAX_ORDER_SIZE_CEILING_USDC` ($1000)
 regardless of what a request sends; commands expire after 60s so one queued
 while the bot was down never fires hours later. Settings changed via
-`set_config`/`pause`/`stop` persist across restarts and **override the env
-files** (logged at startup).
+`set_config`/`pause`/`stop` persist across restarts and **override the
+bot's env file** (logged at startup, in the bot process).
 
-**Every control action goes through one path, on purpose** (see
-[STRATEGY.md](STRATEGY.md) for the full model): the admin process only ever
-*requests* — it writes a command to a queue in SQLite. The bot process (the
-only one holding the wallet key) polls that queue, re-validates, and
-executes. The admin process has zero direct power over the OS process or
-the wallet, even if fully compromised.
+**Every control action goes through one path, on purpose**: the admin
+process only ever *requests* — it writes a command to a queue in SQLite.
+The bot process (the only one holding the wallet key) polls that queue,
+re-validates, and executes. The admin process has zero direct power over
+the OS process or the wallet, even if fully compromised.
 
-The `stop`/`start` commands are **not** OS-level process control —
-`pm2` keeps the bot process itself always running (crash-recovery via
-`autorestart`). "Stop" is an event the bot acts on by disconnecting its
-WebSocket and idling down to just its 1s command poll (so it can still hear
-a future "start"); "pause" (different button) is shallower — it stays fully
-connected and scanning, only skipping trade execution. The stopped/running
-choice is persisted, so a crash-restart resumes in whatever state the
-operator last left it in rather than silently reconnecting.
+The `stop`/`start` commands are **not** OS-level process control — `pm2`
+(in the bot repo) keeps the bot process itself always running
+(crash-recovery via `autorestart`). "Stop" is an event the bot acts on by
+disconnecting its WebSocket and idling down to just its 1s command poll (so
+it can still hear a future "start"); "pause" (different button) is
+shallower — it stays fully connected and scanning, only skipping trade
+execution. The stopped/running choice is persisted, so a crash-restart
+resumes in whatever state the operator last left it in rather than silently
+reconnecting.
 
-## Checking the pipeline
+## Reporting
 
 ```bash
-npm run self-test         # logic: margin/fee/sizing, ledger math, command validation
-npm run integration-test  # live network + local order signing (nothing submitted)
-npm run status            # is the bot alive, what has it seen
-npm run analyze           # full summary (same numbers as the dashboard)
+npm run status   # is the bot alive, what has it seen
+npm run analyze  # full summary (same numbers as /api/summary)
+npm run backup   # copy the SQLite file out, prune old backups
 ```
-
-There's no historical backtest — Polymarket doesn't expose historical
-orderbook depth. Dry-run (`ENABLE_TRADING=false`, the default) is the
-substitute: every opportunity is recorded with why it wasn't traded.
-
-## Fees
-
-Taker fee is `shares * feeRate * p * (1-p)` per leg, feeRate per market (up
-to ~10% observed), peaking near p=0.5. The bot fetches each market's real
-rate and subtracts it before comparing against the thresholds.
-
-## Two-tier margin strategy
-
-- `MIN_PROFIT_MARGIN` (default `0.01`) — "worth recording". Shows true
-  opportunity frequency even for margins too thin to trade.
-- `EXECUTE_MARGIN_THRESHOLD` (default `0.05`) — "worth risking capital".
-  From a non-US VPS (~250ms RTT) a thin margin is usually gone before the
-  order lands. Between the two thresholds: recorded as
-  `below-execute-threshold`, never traded.
-
-## Claiming winnings
-
-Payout after resolution isn't automatic — winning tokens are redeemed with an
-on-chain `redeemPositions` call (costs POL). Send a `redeem` command via the
-admin API (or the admin-page UI, once built), or run
-`npm run redeem -- <conditionId> [--neg-risk]` directly.
-
-**You must supply the contract addresses yourself** (`CTF_ADAPTER_ADDRESS`,
-`NEG_RISK_CTF_ADAPTER_ADDRESS`, `COLLATERAL_TOKEN_ADDRESS`, in `.env.bot`);
-they're blank in `env.bot.dist` on purpose. Docs cross-referencing didn't
-yield an address confirmable with confidence (docs mention a newer "pUSD"
-flow). **Don't
-paste an address from an AI response or an unverified webpage** — a wrong
-one can burn your tokens irreversibly. Safest way: redeem one resolved
-position manually on polymarket.com, open that tx on polygonscan.com — the
-"To" address is the adapter for that market type; the token received is the
-collateral.
 
 ## Status
 
-- [x] Full market coverage (~2100 markets via paginated Gamma API)
-- [x] Live orderbooks: WS `price_change` deltas + REST snapshots (on connect, every 10 min)
-- [x] Fee-aware net margin, two-tier thresholds, depth/min-order-size sizing
-- [x] Execution: both legs FOK, partial fill unwound, gated by `ENABLE_TRADING`
-- [x] Balance/allowance preflight (startup and on every live config change)
-- [x] SQLite ledger: opportunities, trades, positions, commands, settings
-- [x] Admin API: auth, user management, commands queue, wallet-key rotation, redeem
+- [x] SQLite ledger reads: opportunities, trades, positions, commands, settings
+- [x] Auth, user management, commands queue, wallet-key rotation, redeem
 - [x] Zero known dependency vulnerabilities
 - [ ] Admin-page UI (separate project — this repo is API-only)
-- [ ] Automatic redeem when a held market resolves (manual command for now)
-- [ ] Circuit breaker on repeated failures
-
-## Backlog
-
-**Infra (biggest lever):**
-- [ ] Move VPS to US East — ~250ms RTT today; est. ~10-30ms after. Test
-      candidates with
-      `curl -s -o /dev/null -w "%{time_starttransfer}\n" https://clob.polymarket.com/`
-      before committing.
-
-**Reliability:**
-- [ ] Circuit breaker — stop after N consecutive execution failures.
-- [ ] Observe a real `createAndPostMarketOrder` fill/reject — the `.success`
-      handling matches docs but has never seen a live response.
-- [ ] Auto-redeem: watch Gamma for resolution of markets in `positions`,
-      queue a redeem command.
-
-**Strategy validation:**
-- [ ] Let dry-run collect data 24h+ (on the US VPS), then check the
-      dashboard: frequency above 5%, and whether opportunities skew toward
-      low-liquidity markets.
-
-**Decided against (don't redo without new evidence):**
-- Go/Rust rewrite — bottleneck is network RTT, not code (<5ms overhead measured).
-- Worker threads — bot is I/O-bound; per-event work is sub-millisecond.
-- Guessing fee by category — superseded by `client.getFeeRateBps()`.
-- React/Vite for the admin UI — three static files, no build step; revisit
-  if the UI grows substantially.
