@@ -1,7 +1,10 @@
 import { createInterface } from "node:readline/promises";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { config as loadDotenv } from "dotenv";
 import { DEFAULT_DB_PATH, openDb, createUser, findUserByUsername, setKv } from "../db.js";
 import { hashPassword } from "../auth.js";
+
+loadDotenv({ path: ".env.admin", quiet: true }); // DB_PATH lives in the admin env
 
 // Run once (`npm run setup-admin`) to bootstrap the first admin account and
 // the wallet-key-rotation keypair. Nothing here ever touches PRIVATE_KEY —
