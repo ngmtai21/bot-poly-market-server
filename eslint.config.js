@@ -4,7 +4,7 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
-  { ignores: ["dist", "node_modules", "web"] },
+  { ignores: ["dist", "node_modules"] },
   {
     // The admin process is web-facing and must never hold the wallet key or
     // sign anything — it may only use the shared db/commands modules.

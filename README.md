@@ -9,14 +9,42 @@ and the reasoning behind it.
 
 ## Setup
 
-1. `cp env.dist .env` and fill in `PRIVATE_KEY` (Polygon EOA wallet key —
-   never commit this) and `SESSION_SECRET` (see below).
+Two separate env files, one per process — **not just organizational**: the
+bot's file is the only place `PRIVATE_KEY` ever lives, and the admin
+process never loads it (see "Two env files" below).
+
+1. `cp env.bot.dist .env.bot` and fill in `PRIVATE_KEY` (Polygon EOA wallet
+   key — never commit this).
+   `cp env.admin.dist .env.admin` and fill in `SESSION_SECRET`.
 2. `npm install`
 3. `npm run setup-api-key` — derives CLOB API key/secret/passphrase; paste
-   into `.env`.
-4. `npm run setup-admin` — creates the first admin login (see "Admin panel").
+   into `.env.bot`.
+4. `npm run setup-admin` — creates the first admin login (see "Admin API").
 5. For live trading only: fund the Polymarket proxy wallet with USDC.e and
    keep some POL for gas (needed to redeem).
+
+## Two env files
+
+`config.ts` (bot) loads `.env.bot` explicitly; `admin/server.ts` loads
+`.env.admin` explicitly — neither falls back to a shared/ambiguous `.env`.
+This is enforced by which file physically contains which variables, not
+just by runtime filtering (though the admin process also keeps a private
+copy of what it reads, as defense in depth):
+
+| | `.env.bot` | `.env.admin` |
+|---|---|---|
+| `PRIVATE_KEY`, `WALLET_KEY_DECRYPT_PRIVATE_KEY` | ✓ | never |
+| `CLOB_API_*`, `CTF_*`/`COLLATERAL_TOKEN_ADDRESS` | ✓ | never |
+| Trading thresholds, `ENABLE_TRADING` | ✓ | never |
+| `DB_PATH` | ✓ (must match) | ✓ (must match) |
+| `SESSION_SECRET`, `ADMIN_HOST`, `ADMIN_PORT` | never | ✓ |
+| `TELEGRAM_BOT_TOKEN`/`CHAT_ID` | ✓ (bot-side alerts) | ✓ (admin-side alerts) |
+| `BACKUP_DIR`/`BACKUP_KEEP` | ✓ | never |
+
+Both `.env.bot` and `.env.admin` are gitignored. `npm run setup-admin` and
+the one-off scripts (`setup-api-key`, `backup`, `status`, `analyze`,
+`redeem`, `integration-test`) all read `.env.bot` (they need `DB_PATH` and,
+for most of them, transitively import `config.ts`).
 
 ## Running
 
@@ -33,7 +61,7 @@ After a `git pull` on the VPS to ship changes:
 ```bash
 git pull
 npm install                       # if package.json changed
-pm2 reload ecosystem.config.cjs   # restarts both with the new code/.env
+pm2 reload ecosystem.config.cjs   # restarts both with the new code/env files
 ```
 
 Single-service commands when you only need one:
@@ -56,15 +84,21 @@ priority than `npm run admin` (`nice -n -5` vs `-n 10` — needs root, which
 the VPS runs as; degrades harmlessly to normal priority otherwise) as a
 belt-and-suspenders guarantee under CPU pressure.
 
-## Admin panel
+## Admin API
 
-Username/password login, not a bearer token — accounts live in the shared
-SQLite db (`users` table, scrypt-hashed passwords, never in `.env` or
-plaintext anywhere).
+Pure JSON API, no UI served from this repo — the admin-page frontend is a
+separate project that calls this API over HTTP from its own origin (dev
+server or static host). CORS reflects the caller's `Origin` dynamically and
+auth is bearer-token (not cookies), so this is safe by design: see
+`src/admin/server.ts`'s CORS comment.
 
-- Set `SESSION_SECRET` in `.env` (any random string — signs login sessions;
-  if left unset the process generates one at startup and warns, but every
-  session drops on restart).
+Username/password login, not a static bearer token — accounts live in the
+shared SQLite db (`users` table, scrypt-hashed passwords, never in any env
+file or plaintext anywhere).
+
+- Set `SESSION_SECRET` in `.env.admin` (any random string — signs login
+  sessions; if left unset the process generates one at startup and warns,
+  but every session drops on restart).
 - Create the first account: `npm run setup-admin` — interactive by default
   (prompts for username/password, optionally generates the wallet-key-
   rotation keypair). Safe to re-run; skips creating a user that already
@@ -78,23 +112,31 @@ plaintext anywhere).
   ADMIN_USERNAME=admin ADMIN_GENERATE_ROTATION_KEYS=yes npm run setup-admin
   ```
 - It binds to `127.0.0.1:8787` by default — **don't expose it publicly**.
-  From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>` then open
-  http://localhost:8787 and log in.
+  From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>`, then point the
+  admin-page project's API base URL at `http://localhost:8787`.
 
-Tabs:
-- **Dashboard** — P&L, opportunity counts by reason, bot health (heartbeat,
-  WS, books synced), and controls: start/stop/restart the bot process,
-  enable/disable live trading, pause/resume, change thresholds and order size.
-- **Markets** — top 500 markets by 24h volume and a live YES/NO orderbook,
-  loaded straight from Polymarket's public API/WebSocket by the browser.
-- **Opportunities / Trades / Positions / Commands** — everything the bot has
-  recorded; positions have a Redeem button once markets resolve.
+Endpoints (all under `/api/`, all but login require `Authorization: Bearer
+<token>` from `POST /api/auth/login`):
+- `GET status` / `summary` / `opportunities` / `trades` / `positions` /
+  `commands` / `audit` — everything the bot has recorded, and its heartbeat.
+- `POST commands` — queue a `set_config | pause | resume | stop | start |
+  redeem` command for the bot to validate and execute (admin role only).
+- `GET/POST users`, `DELETE users/:id`, `POST users/:id/reset-password` —
+  account management (admin role only; can't delete the last admin or
+  yourself).
+- `POST auth/change-password` — any logged-in user, own account.
+- `GET/PUT config/addresses` — the redeem contract addresses (view: any
+  role, edit: admin only).
+- `GET wallet/rotation-status`, `POST wallet/stage-key` — see "Rotating the
+  wallet key" below.
 
-Control safety: enabling live trading requires typing `ENABLE` and passes the
-same balance/allowance preflight as startup (rolled back if it fails); order
-size is capped at $1000 from the UI; commands expire after 60s so a click
-made while the bot was down never fires hours later. Settings changed from
-the panel persist across restarts and **override `.env`** (logged at startup).
+Control safety: `set_config { enableTrading: true }` requires the bot to
+re-pass the same balance/allowance preflight as startup (rolled back if it
+fails); `maxOrderSizeUsdc` is capped at `MAX_ORDER_SIZE_CEILING_USDC` ($1000)
+regardless of what a request sends; commands expire after 60s so one queued
+while the bot was down never fires hours later. Settings changed via
+`set_config`/`pause`/`stop` persist across restarts and **override the env
+files** (logged at startup).
 
 **Every control action goes through one path, on purpose** (see
 [STRATEGY.md](STRATEGY.md) for the full model): the admin process only ever
@@ -103,7 +145,7 @@ only one holding the wallet key) polls that queue, re-validates, and
 executes. The admin process has zero direct power over the OS process or
 the wallet, even if fully compromised.
 
-Start/Stop/Restart on the Dashboard is **not** OS-level process control —
+The `stop`/`start` commands are **not** OS-level process control —
 `pm2` keeps the bot process itself always running (crash-recovery via
 `autorestart`). "Stop" is an event the bot acts on by disconnecting its
 WebSocket and idling down to just its 1s command poll (so it can still hear
@@ -143,13 +185,15 @@ rate and subtracts it before comparing against the thresholds.
 ## Claiming winnings
 
 Payout after resolution isn't automatic — winning tokens are redeemed with an
-on-chain `redeemPositions` call (costs POL). Use the Redeem button in the
-Positions tab, or `npm run redeem -- <conditionId> [--neg-risk]`.
+on-chain `redeemPositions` call (costs POL). Send a `redeem` command via the
+admin API (or the admin-page UI, once built), or run
+`npm run redeem -- <conditionId> [--neg-risk]` directly.
 
 **You must supply the contract addresses yourself** (`CTF_ADAPTER_ADDRESS`,
-`NEG_RISK_CTF_ADAPTER_ADDRESS`, `COLLATERAL_TOKEN_ADDRESS`); they're blank
-in `env.dist` on purpose. Docs cross-referencing didn't yield an address
-confirmable with confidence (docs mention a newer "pUSD" flow). **Don't
+`NEG_RISK_CTF_ADAPTER_ADDRESS`, `COLLATERAL_TOKEN_ADDRESS`, in `.env.bot`);
+they're blank in `env.bot.dist` on purpose. Docs cross-referencing didn't
+yield an address confirmable with confidence (docs mention a newer "pUSD"
+flow). **Don't
 paste an address from an AI response or an unverified webpage** — a wrong
 one can burn your tokens irreversibly. Safest way: redeem one resolved
 position manually on polymarket.com, open that tx on polygonscan.com — the
@@ -164,9 +208,10 @@ collateral.
 - [x] Execution: both legs FOK, partial fill unwound, gated by `ENABLE_TRADING`
 - [x] Balance/allowance preflight (startup and on every live config change)
 - [x] SQLite ledger: opportunities, trades, positions, commands, settings
-- [x] Admin panel with controls, live orderbook viewer, redeem
+- [x] Admin API: auth, user management, commands queue, wallet-key rotation, redeem
 - [x] Zero known dependency vulnerabilities
-- [ ] Automatic redeem when a held market resolves (manual button for now)
+- [ ] Admin-page UI (separate project — this repo is API-only)
+- [ ] Automatic redeem when a held market resolves (manual command for now)
 - [ ] Circuit breaker on repeated failures
 
 ## Backlog

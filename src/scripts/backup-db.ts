@@ -1,7 +1,9 @@
-import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
 import { existsSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 import { DEFAULT_DB_PATH, openDb } from "../db.js";
+
+loadDotenv({ path: ".env.bot", quiet: true }); // DB_PATH/BACKUP_* live in the bot env
 
 // Point-in-time backup of the shared SQLite db. Safe to run while the bot
 // and admin processes are up: WAL checkpoint flushes pending writes into

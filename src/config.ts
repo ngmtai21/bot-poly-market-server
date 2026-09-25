@@ -1,5 +1,20 @@
-import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
 import { DEFAULT_DB_PATH } from "./db.js";
+
+// Explicit path, not the bare `dotenv/config` auto-import: this process
+// must only ever read .env.bot, never a shared/ambiguous `.env` that the
+// admin process could also end up pointed at.
+//
+// Ordering note: ESM always finishes evaluating a module's imports (here,
+// db.js) before running that module's own top-level code, regardless of
+// where the import statement sits in the source — so db.js runs before
+// this loadDotenv() call either way, and reordering the imports above
+// cannot change that. This is only safe because db.js (and everything it
+// imports, e.g. alerts.js) never reads process.env at module top level,
+// only lazily inside function bodies called later. If that ever changes,
+// this call must move into every module that needs it, or that module
+// must avoid reading env at import time.
+loadDotenv({ path: ".env.bot", quiet: true });
 
 export const config = {
   // Optional: a key can also be staged from the admin panel (RSA-OAEP

@@ -1,7 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { publicEncrypt, constants as cryptoConstants, randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { extname, resolve, sep } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
   DEFAULT_DB_PATH,
@@ -23,23 +21,33 @@ import { validateCommand } from "../commands.js";
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, type Role, type SessionPayload } from "../auth.js";
 import { sendAlert } from "../alerts.js";
 
-// Admin API + static UI, as a SEPARATE process from the trading bot:
+// Pure JSON API (no static file serving — the admin-page UI is a separate
+// project that calls this API over HTTP, from its own origin), as a
+// SEPARATE process from the trading bot:
 // - its event loop can't slow the bot's hot path, and
 // - it never holds the wallet key. It only reads SQLite and queues
 //   commands; the bot process validates and executes them.
 // ESLint (eslint.config.js) blocks this folder from importing any module
 // that touches PRIVATE_KEY or signing.
 
-// Parse .env into a private object instead of process.env, then keep only
-// what this process needs — PRIVATE_KEY (and its rotation-decrypt
-// counterpart, WALLET_KEY_DECRYPT_PRIVATE_KEY) never enter this environment.
+// Loads .env.admin specifically — a physically separate file from the bot's
+// .env.bot, which is the primary defense: PRIVATE_KEY/WALLET_KEY_DECRYPT_
+// PRIVATE_KEY/CLOB_API_*/CTF_* simply don't exist in this file (see
+// env.admin.dist). Still parsed into a private object rather than
+// process.env, and only the specific keys below are kept, as defense in
+// depth against .env.admin ever accidentally growing a stray sensitive var.
 const fileEnv: Record<string, string> = {};
-loadDotenv({ processEnv: fileEnv, quiet: true });
+loadDotenv({ processEnv: fileEnv, path: ".env.admin", quiet: true });
 const env = (k: string) => process.env[k] ?? fileEnv[k];
 const HOST = env("ADMIN_HOST") ?? "127.0.0.1";
 const PORT = Number(env("ADMIN_PORT") ?? 8787);
 const DB_PATH = env("DB_PATH") ?? DEFAULT_DB_PATH;
 let SESSION_SECRET = env("SESSION_SECRET") ?? "";
+// alerts.ts reads process.env directly (it's shared with the bot process,
+// which has no fileEnv indirection) — these two carry no key material, so
+// they're the only vars actually promoted into process.env here.
+if (fileEnv.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = fileEnv.TELEGRAM_BOT_TOKEN;
+if (fileEnv.TELEGRAM_CHAT_ID) process.env.TELEGRAM_CHAT_ID = fileEnv.TELEGRAM_CHAT_ID;
 for (const k of Object.keys(fileEnv)) delete fileEnv[k];
 
 if (!SESSION_SECRET) {
@@ -58,7 +66,6 @@ function randomBytes32Hex(): string {
 }
 
 const db = openDb(DB_PATH);
-const WEB_ROOT = resolve("web");
 const HEARTBEAT_STALE_MS = 15_000;
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
@@ -82,20 +89,13 @@ function authenticate(req: AuthedRequest): SessionPayload | null {
   return session;
 }
 
+// CSP/frame-ancestors etc. only matter for HTML documents a browser
+// renders — this server never serves one, so just the generic API
+// hardening headers apply here.
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
-  // The UI talks to its own API plus Polymarket's public endpoints directly
-  // (orderbook/markets are public, CORS-open — no need to proxy them).
-  "Content-Security-Policy": [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self'",
-    "img-src 'self' data: https:",
-    "connect-src 'self' https://gamma-api.polymarket.com https://clob.polymarket.com wss://ws-subscriptions-clob.polymarket.com",
-    "frame-ancestors 'none'",
-  ].join("; "),
 };
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -387,25 +387,6 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
   return send(res, 404, { error: "not found" });
 }
 
-const CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-};
-
-async function handleStatic(res: ServerResponse, url: URL): Promise<void> {
-  const file = resolve(WEB_ROOT, "." + (url.pathname === "/" ? "/index.html" : url.pathname));
-  if (!file.startsWith(WEB_ROOT + sep)) return send(res, 404, { error: "not found" });
-  try {
-    const data = await readFile(file);
-    res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": CONTENT_TYPES[extname(file)] ?? "application/octet-stream" });
-    res.end(data);
-  } catch {
-    send(res, 404, { error: "not found" });
-  }
-}
-
 if (countAdmins(db) === 0) {
   console.warn("No admin account exists yet — run `npm run setup-admin` before logging in.");
 }
@@ -431,8 +412,8 @@ createServer((req, res) => {
   // Bearer-token auth (no cookies), so reflecting the caller's Origin is
   // safe from CSRF — it only widens *which pages* can read a response the
   // caller must already have a valid session token to obtain. Needed
-  // because the new admin SPA is served from its own origin (e.g. the Vite
-  // dev server) rather than by this same process.
+  // because the admin-page UI is a separate project/origin (its own dev
+  // server or static host) calling this API, not served by this process.
   if (req.headers.origin) {
     res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
     res.setHeader("Vary", "Origin");
@@ -445,13 +426,12 @@ createServer((req, res) => {
   }
 
   const url = new URL(req.url ?? "/", "http://localhost");
-  const handler = url.pathname.startsWith("/api/") ? handleApi(req, res, url) : handleStatic(res, url);
-  handler.catch((err) => {
+  handleApi(req, res, url).catch((err) => {
     console.error("admin request failed", err);
     if (!res.headersSent) send(res, 500, { error: "internal error" });
   });
 }).listen(PORT, HOST, () => {
-  console.log(`Admin panel on http://${HOST}:${PORT} (db: ${DB_PATH})`);
+  console.log(`Admin API on http://${HOST}:${PORT} (db: ${DB_PATH})`);
   if (HOST !== "127.0.0.1" && HOST !== "localhost") {
     console.warn("WARNING: admin is bound to a non-loopback address — prefer 127.0.0.1 + SSH tunnel.");
   }
