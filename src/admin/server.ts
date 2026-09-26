@@ -30,14 +30,14 @@ import { sendAlert } from "../alerts.js";
 // ESLint (eslint.config.js) blocks this folder from importing any module
 // that touches PRIVATE_KEY or signing.
 
-// Loads .env.admin specifically — a physically separate file from the bot's
+// Loads this repo's own .env — physically separate from the bot repo's
 // .env.bot, which is the primary defense: PRIVATE_KEY/WALLET_KEY_DECRYPT_
 // PRIVATE_KEY/CLOB_API_*/CTF_* simply don't exist in this file (see
-// env.admin.dist). Still parsed into a private object rather than
-// process.env, and only the specific keys below are kept, as defense in
-// depth against .env.admin ever accidentally growing a stray sensitive var.
+// env.dist). Still parsed into a private object rather than process.env,
+// and only the specific keys below are kept, as defense in depth against
+// .env ever accidentally growing a stray sensitive var.
 const fileEnv: Record<string, string> = {};
-loadDotenv({ processEnv: fileEnv, path: ".env.admin", quiet: true });
+loadDotenv({ processEnv: fileEnv, path: ".env", quiet: true });
 const env = (k: string) => process.env[k] ?? fileEnv[k];
 const HOST = env("ADMIN_HOST") ?? "127.0.0.1";
 const PORT = Number(env("ADMIN_PORT") ?? 8787);
@@ -54,12 +54,12 @@ if (!SESSION_SECRET) {
   // A signing secret, not a user credential — losing it lets someone forge
   // session tokens, but it alone never reveals a password or the wallet
   // key. Auto-generating one on first boot (and warning loudly) beats
-  // forcing yet another value into .env.admin before the API is usable; set
-  // SESSION_SECRET explicitly in .env.admin for a stable value across
+  // forcing yet another value into .env before the API is usable; set
+  // SESSION_SECRET explicitly in .env for a stable value across
   // restarts (otherwise every restart invalidates existing sessions).
   SESSION_SECRET = randomBytes32Hex();
-  console.warn("SESSION_SECRET not set in .env.admin — using a random one for this run (all sessions drop on restart).");
-  console.warn(`Set SESSION_SECRET=${SESSION_SECRET} in .env.admin to keep sessions stable across restarts.`);
+  console.warn("SESSION_SECRET not set in .env — using a random one for this run (all sessions drop on restart).");
+  console.warn(`Set SESSION_SECRET=${SESSION_SECRET} in .env to keep sessions stable across restarts.`);
 }
 function randomBytes32Hex(): string {
   return randomBytes(32).toString("hex");

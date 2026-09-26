@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 import { DEFAULT_DB_PATH, openDb, setKv } from "../db.js";
 
-loadDotenv({ path: ".env.admin", quiet: true }); // DB_PATH lives in the admin env
+loadDotenv({ path: ".env", quiet: true }); // DB_PATH lives in the admin env
 
 // Run this only if you want the "stage a new wallet key from the admin
 // panel" feature (POST /api/wallet/stage-key). Unrelated to admin login —
@@ -43,7 +43,7 @@ async function main() {
   });
   setKv(db, "walletKeyPublicKey", publicKey);
   console.log("\nPublic key stored in the db (the admin panel uses it to encrypt a new wallet key).");
-  console.log("\nAdd this to the BOT process's ../bot/.env.bot ONLY (never this repo's .env.admin):\n");
+  console.log("\nAdd this to the BOT process's ../bot/.env.bot ONLY (never this repo's .env):\n");
   console.log(`WALLET_KEY_DECRYPT_PRIVATE_KEY=${Buffer.from(privateKey).toString("base64")}\n`);
   console.log("Without this, the bot ignores any key staged from the admin panel and keeps using .env.bot's PRIVATE_KEY.");
 }

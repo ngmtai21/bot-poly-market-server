@@ -2,7 +2,7 @@ import { config as loadDotenv } from "dotenv";
 import { existsSync } from "node:fs";
 import { DEFAULT_DB_PATH, getKv, openDb } from "../db.js";
 
-loadDotenv({ path: ".env.admin", quiet: true }); // DB_PATH lives in the admin env
+loadDotenv({ path: ".env", quiet: true }); // DB_PATH lives in the admin env
 
 // Quick "is the bot alive and has it seen anything" check, from the status
 // heartbeat the bot writes to SQLite every 5s.

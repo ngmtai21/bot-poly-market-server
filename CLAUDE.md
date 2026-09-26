@@ -23,7 +23,7 @@ npm run lint              # eslint src
 
 ## Two repos, one SQLite file
 
-- **This repo (admin)** ([src/admin/server.ts](src/admin/server.ts)) — reads SQLite, inserts commands, serves a pure JSON API. The admin-page UI is a separate frontend project that calls this API cross-origin (CORS reflects the caller's `Origin` dynamically; bearer-token auth, no cookies, so that's CSRF-safe). Loads `.env.admin` explicitly (`dotenv`'s `path` option, not the bare `dotenv/config` auto-import) into a private object (`processEnv: {}`) — a physically separate file from the bot's `.env.bot`, in a physically separate repo, is the primary defense for keeping `PRIVATE_KEY` out of this process; the fileEnv indirection is defense in depth on top of that.
+- **This repo (admin)** ([src/admin/server.ts](src/admin/server.ts)) — reads SQLite, inserts commands, serves a pure JSON API. The admin-page UI is a separate frontend project that calls this API cross-origin (CORS reflects the caller's `Origin` dynamically; bearer-token auth, no cookies, so that's CSRF-safe). Loads `.env` explicitly (`dotenv`'s `path` option, not the bare `dotenv/config` auto-import) into a private object (`processEnv: {}`) — a physically separate file from the bot's `.env.bot`, in a physically separate repo, is the primary defense for keeping `PRIVATE_KEY` out of this process; the fileEnv indirection is defense in depth on top of that.
 - **Sibling repo (`../bot`)** — the only process with `PRIVATE_KEY`. Writes opportunities/trades/positions and a status heartbeat; polls the `commands` table every second.
 - The two never call each other directly (no RPC/HTTP between them) — only the shared SQLite file. Its schema, in [src/db.ts](src/db.ts), is the contract. SQLite runs in WAL mode with `busy_timeout` for concurrent access from both processes.
 
@@ -38,4 +38,4 @@ There is no UI in this repo — the admin-page frontend is a separate project th
 ## Conventions
 
 - ESM throughout (`"type": "module"` + `NodeNext`) — relative imports use explicit `.js` extensions.
-- Never commit `.env.admin`; never put `PRIVATE_KEY` in it. `data/` (SQLite) is gitignored.
+- Never commit `.env`; never put `PRIVATE_KEY` in it. `data/` (SQLite) is gitignored.

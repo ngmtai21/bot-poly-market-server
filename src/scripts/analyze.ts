@@ -2,7 +2,7 @@ import { config as loadDotenv } from "dotenv";
 import { existsSync } from "node:fs";
 import { DEFAULT_DB_PATH, openDb, summarize } from "../db.js";
 
-loadDotenv({ path: ".env.admin", quiet: true }); // DB_PATH lives in the admin env
+loadDotenv({ path: ".env", quiet: true }); // DB_PATH lives in the admin env
 
 // Summarizes everything the bot has recorded: opportunity counts by reason,
 // average margin, hypothetical profit, real trade outcomes, open positions.

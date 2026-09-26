@@ -4,7 +4,7 @@ import { config as loadDotenv } from "dotenv";
 import { DEFAULT_DB_PATH, openDb, createUser, findUserByUsername } from "../db.js";
 import { hashPassword } from "../auth.js";
 
-loadDotenv({ path: ".env.admin", quiet: true }); // DB_PATH lives in the admin env
+loadDotenv({ path: ".env", quiet: true }); // DB_PATH lives in the admin env
 
 // Run once (`npm run setup-admin`) to bootstrap the first admin account.
 // Only touches the `users` table — never PRIVATE_KEY or anything wallet-

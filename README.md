@@ -11,7 +11,7 @@ for the strategy walkthrough.
 
 ## Setup
 
-1. `cp env.admin.dist .env.admin` and fill in `SESSION_SECRET`, `DB_PATH`
+1. `cp env.dist .env` and fill in `SESSION_SECRET`, `DB_PATH`
    (must point at the same `data/bot.db` the bot repo uses).
 2. `npm install`
 3. `npm run setup-admin` — creates the first admin login (see "Admin API").
@@ -24,13 +24,13 @@ This repo doesn't need the `../bot` repo present to run — it only needs to
 read the same `data/bot.db` file, wherever that lives. Simplest is cloning
 both repos as siblings on the VPS (matches `DB_PATH=data/bot.db` relative
 paths in both `.env` files), but any layout works as long as `DB_PATH` in
-`.env.admin` and in the bot's `.env.bot` resolve to the same file.
+`.env` and in the bot's `.env.bot` resolve to the same file.
 
 ```bash
 # on the VPS, once:
 git clone <this-repo-url> server && cd server
 npm install -g pm2   # if not already installed
-cp env.admin.dist .env.admin
+cp env.dist .env
 # fill in SESSION_SECRET (see "Admin API" below), ADMIN_HOST/PORT, DB_PATH
 npm install
 npm run setup-admin   # creates the first admin login
@@ -54,7 +54,7 @@ The API binds to `127.0.0.1:8787` only — reach it from your laptop via
 
 ## Two repos, one SQLite file
 
-`admin/server.ts` loads `.env.admin` explicitly — it never touches
+`admin/server.ts` loads `.env` explicitly — it never touches
 `PRIVATE_KEY`, which lives only in `../bot/.env.bot`. Physical separation
 (different files, different repos) is the primary defense; the admin
 process also keeps a private copy of what it reads (`processEnv: {}`) as
@@ -90,7 +90,7 @@ Username/password login, not a static bearer token — accounts live in the
 shared SQLite db (`users` table, scrypt-hashed passwords, never in any env
 file or plaintext anywhere).
 
-- Set `SESSION_SECRET` in `.env.admin` (any random string — signs login
+- Set `SESSION_SECRET` in `.env` (any random string — signs login
   sessions; if left unset the process generates one at startup and warns,
   but every session drops on restart).
 - Create the first account: `npm run setup-admin` — interactive by default
