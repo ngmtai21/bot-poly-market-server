@@ -129,11 +129,47 @@ function clientIp(req: IncomingMessage): string | null {
   return req.socket.remoteAddress ?? null;
 }
 
+// Login brute-force lockout, per IP. In-memory (resets on restart) — this
+// process is a single instance behind an SSH tunnel, not a distributed
+// deployment, so that's not a real weakness here.
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const loginAttempts = new Map<string, { count: number; windowStart: number }>();
+
+function loginLockedOut(key: string): boolean {
+  const entry = loginAttempts.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(key);
+    return false;
+  }
+  return entry.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordLoginFailure(key: string): void {
+  const entry = loginAttempts.get(key);
+  if (!entry || Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(key, { count: 1, windowStart: Date.now() });
+  } else {
+    entry.count++;
+  }
+}
+
+function clearLoginFailures(key: string): void {
+  loginAttempts.delete(key);
+}
+
 async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Promise<void> {
   const route = `${req.method} ${url.pathname}`;
 
   // Login is the only unauthenticated route.
   if (route === "POST /api/auth/login") {
+    const ip = clientIp(req);
+    const lockoutKey = ip ?? "unknown";
+    if (loginLockedOut(lockoutKey)) {
+      return send(res, 429, { error: "too many failed login attempts — try again later" });
+    }
+
     let body: { username?: unknown; password?: unknown };
     try {
       body = (await readJson(req)) as typeof body;
@@ -143,12 +179,13 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
     if (typeof body.username !== "string" || typeof body.password !== "string") {
       return send(res, 400, { error: "username and password are required" });
     }
-    const ip = clientIp(req);
     const user = findUserByUsername(db, body.username);
     if (!user || !verifyPassword(body.password, user.password_hash)) {
+      recordLoginFailure(lockoutKey);
       recordAudit(db, { username: body.username, action: "login_failed", ip });
       return send(res, 401, { error: "invalid username or password" });
     }
+    clearLoginFailures(lockoutKey);
     recordAudit(db, { username: user.username, action: "login", ip });
     void sendAlert(`🔑 Login: <b>${user.username}</b> (${user.role})${ip ? ` from ${ip}` : ""}`);
     const token = createSessionToken({ userId: user.id, username: user.username, role: user.role }, SESSION_SECRET);
