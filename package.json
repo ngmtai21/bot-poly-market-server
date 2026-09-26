@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "setup-admin": "tsx src/scripts/setup-admin.ts",
-    "setup-rotation-keys": "tsx src/scripts/setup-rotation-keys.ts",
+    "setup-admin": "tsx --disable-warning=ExperimentalWarning src/scripts/setup-admin.ts",
+    "setup-rotation-keys": "tsx --disable-warning=ExperimentalWarning src/scripts/setup-rotation-keys.ts",
     "admin": "nice -n 10 tsx --disable-warning=ExperimentalWarning src/admin/server.ts",
     "analyze": "tsx --disable-warning=ExperimentalWarning src/scripts/analyze.ts",
     "status": "tsx --disable-warning=ExperimentalWarning src/scripts/status.ts",
