@@ -11,7 +11,6 @@ The admin API for a Polymarket within-market arbitrage bot. This repo is **admin
 ```bash
 npm run admin             # admin API: HTTP + JSON only; never loads PRIVATE_KEY
 npm run setup-admin       # bootstrap the first admin login (interactive; non-interactive via ADMIN_USERNAME/ADMIN_PASSWORD env vars — see src/scripts/setup-admin.ts)
-npm run setup-rotation-keys  # separate, optional: generate the wallet-key-rotation RSA keypair (see src/scripts/setup-rotation-keys.ts)
 npm run status            # is the bot alive (heartbeat in SQLite), latest opportunity
 npm run analyze           # summary from SQLite (same summarize() as /api/summary)
 npm run backup            # copy the SQLite file out, prune old backups

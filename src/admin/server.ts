@@ -384,9 +384,10 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
 
   // ---- Wallet key rotation (admin only) ----
   // The admin process only ever holds the PUBLIC half of this keypair — it
-  // can encrypt a new key but never decrypt one. Only the bot process,
-  // which holds WALLET_KEY_DECRYPT_PRIVATE_KEY in its own .env.bot, can recover
-  // the plaintext (see src/walletKeyRotation.ts).
+  // can encrypt a new key but never decrypt one. The bot repo generates and
+  // keeps the matching private half itself (a local file, never in this
+  // DB), publishing the public half here on its own — see
+  // ../bot/src/walletKeyRotation.ts. Nothing to set up on this side.
   if (route === "GET /api/wallet/rotation-status") {
     if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
     const publicKey = getKv<string>(db, "walletKeyPublicKey");
@@ -397,7 +398,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
     if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
     const publicKey = getKv<string>(db, "walletKeyPublicKey");
     if (!publicKey) {
-      return send(res, 400, { error: "rotation keypair not set up — run `npm run setup-admin` on the server first" });
+      return send(res, 400, { error: "rotation keypair not published yet — start the bot process once, it publishes its public key on first boot" });
     }
     let body: { privateKey?: unknown };
     try {

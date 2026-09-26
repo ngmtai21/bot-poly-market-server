@@ -15,8 +15,9 @@ for the strategy walkthrough.
    (must point at the same `data/bot.db` the bot repo uses).
 2. `npm install`
 3. `npm run setup-admin` — creates the first admin login (see "Admin API").
-   Unrelated wallet-key-rotation keypair: `npm run setup-rotation-keys`
-   (optional, skip it if you'll only ever set `PRIVATE_KEY` directly).
+   Nothing else to set up for wallet-key rotation — the bot repo generates
+   and manages its own keypair; this repo just reads the public half it
+   publishes to the shared DB.
 
 ## Deploying to a VPS
 
@@ -104,9 +105,10 @@ file or plaintext anywhere).
   ```bash
   ADMIN_USERNAME=admin npm run setup-admin
   ```
-- Wallet-key rotation (`POST /api/wallet/stage-key`) is a separate, optional
-  feature — set it up with `npm run setup-rotation-keys` (see "Rotating the
-  wallet key" below). Not required for logging in or for basic control.
+- Wallet-key rotation (`POST /api/wallet/stage-key`) needs no setup on this
+  side — the bot repo generates its own RSA keypair on first boot and
+  publishes the public half to the shared DB; this endpoint just reads it
+  (`GET /api/wallet/rotation-status` reports whether one's available yet).
 - It binds to `127.0.0.1:8787` by default — **don't expose it publicly**.
   From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>`, then point the
   admin-page project's API base URL at `http://localhost:8787`.
@@ -124,7 +126,7 @@ Endpoints (all under `/api/`, all but login require `Authorization: Bearer
 - `GET/PUT config/addresses` — the redeem contract addresses (view: any
   role, edit: admin only).
 - `GET wallet/rotation-status`, `POST wallet/stage-key` — see the bot
-  repo's README, "Rotating the wallet key".
+  repo's README, "Entering the wallet key from the admin panel".
 
 Control safety: `set_config { enableTrading: true }` requires the bot to
 re-pass the same balance/allowance preflight as startup (rolled back if it

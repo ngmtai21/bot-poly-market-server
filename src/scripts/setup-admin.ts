@@ -9,8 +9,9 @@ loadDotenv({ path: ".env", quiet: true }); // DB_PATH lives in the admin env
 // Run once (`npm run setup-admin`) to bootstrap the first admin account.
 // Only touches the `users` table — never PRIVATE_KEY or anything wallet-
 // related. Safe to re-run: skips creating a user that already exists.
-// For the (separate, optional) wallet-key-rotation keypair, see
-// `npm run setup-rotation-keys`.
+// Wallet-key rotation needs no setup here at all — the bot repo generates
+// and manages its own RSA keypair, publishing the public half straight into
+// the shared DB (see ../bot/src/walletKeyRotation.ts).
 //
 // Non-interactive mode (for deploy scripts/CI, where nothing can type into
 // a readline prompt): set ADMIN_USERNAME (and optionally ADMIN_PASSWORD) as
