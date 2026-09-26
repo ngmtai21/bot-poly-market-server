@@ -15,6 +15,8 @@ for the strategy walkthrough.
    (must point at the same `data/bot.db` the bot repo uses).
 2. `npm install`
 3. `npm run setup-admin` — creates the first admin login (see "Admin API").
+   Unrelated wallet-key-rotation keypair: `npm run setup-rotation-keys`
+   (optional, skip it if you'll only ever set `PRIVATE_KEY` directly).
 
 ## Deploying to a VPS
 
@@ -92,17 +94,19 @@ file or plaintext anywhere).
   sessions; if left unset the process generates one at startup and warns,
   but every session drops on restart).
 - Create the first account: `npm run setup-admin` — interactive by default
-  (prompts for username/password, optionally generates the wallet-key-
-  rotation keypair). Safe to re-run; skips creating a user that already
-  exists.
+  (prompts for username/password). Safe to re-run; skips creating a user
+  that already exists.
 - **Non-interactive** (deploy scripts/CI, where nothing can answer a
   prompt): set `ADMIN_USERNAME` and run with `< /dev/null` or any closed/
   piped stdin — it detects the non-TTY and never blocks on a prompt.
   `ADMIN_PASSWORD` unset still auto-generates and prints one; a genuinely
   missing `ADMIN_USERNAME` fails loudly (exit 1) instead of hanging.
   ```bash
-  ADMIN_USERNAME=admin ADMIN_GENERATE_ROTATION_KEYS=yes npm run setup-admin
+  ADMIN_USERNAME=admin npm run setup-admin
   ```
+- Wallet-key rotation (`POST /api/wallet/stage-key`) is a separate, optional
+  feature — set it up with `npm run setup-rotation-keys` (see "Rotating the
+  wallet key" below). Not required for logging in or for basic control.
 - It binds to `127.0.0.1:8787` by default — **don't expose it publicly**.
   From your laptop: `ssh -L 8787:127.0.0.1:8787 root@<vps>`, then point the
   admin-page project's API base URL at `http://localhost:8787`.
