@@ -30,8 +30,8 @@ import { sendAlert } from "../alerts.js";
 // ESLint (eslint.config.js) blocks this folder from importing any module
 // that touches PRIVATE_KEY or signing.
 
-// Loads this repo's own .env — physically separate from the bot repo's
-// .env.bot, which is the primary defense: PRIVATE_KEY/WALLET_KEY_DECRYPT_
+// Loads this repo's own .env — physically separate from the bot repo's own
+// .env, which is the primary defense: PRIVATE_KEY/WALLET_KEY_DECRYPT_
 // PRIVATE_KEY/CLOB_API_*/CTF_* simply don't exist in this file (see
 // env.dist). Still parsed into a private object rather than process.env,
 // and only the specific keys below are kept, as defense in depth against
@@ -355,6 +355,13 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
         collateralTokenAddress: "",
       }
     );
+  }
+  // The bot publishes these on every boot (see ../bot/src/scan.ts) — single
+  // source of truth for the verified defaults stays there, this just reads
+  // them. Powers the "Reset to default" button; an empty object means the
+  // bot hasn't booted since this feature shipped (older version).
+  if (route === "GET /api/config/addresses/default") {
+    return send(res, 200, getKv(db, "defaultContractAddresses") ?? {});
   }
   if (route === "PUT /api/config/addresses") {
     if (!requireAdmin()) return send(res, 403, { error: "admin role required" });

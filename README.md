@@ -25,7 +25,7 @@ This repo doesn't need the `../bot` repo present to run — it only needs to
 read the same `data/bot.db` file, wherever that lives. Simplest is cloning
 both repos as siblings on the VPS (matches `DB_PATH=data/bot.db` relative
 paths in both `.env` files), but any layout works as long as `DB_PATH` in
-`.env` and in the bot's `.env.bot` resolve to the same file.
+`.env` and in the bot's own `.env` resolve to the same file.
 
 ```bash
 # on the VPS, once:
@@ -56,7 +56,7 @@ The API binds to `127.0.0.1:8787` only — reach it from your laptop via
 ## Two repos, one SQLite file
 
 `admin/server.ts` loads `.env` explicitly — it never touches
-`PRIVATE_KEY`, which lives only in `../bot/.env.bot`. Physical separation
+`PRIVATE_KEY`, which lives only in `../bot`'s own `.env`. Physical separation
 (different files, different repos) is the primary defense; the admin
 process also keeps a private copy of what it reads (`processEnv: {}`) as
 defense in depth.
