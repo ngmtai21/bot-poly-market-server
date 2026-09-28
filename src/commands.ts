@@ -8,6 +8,13 @@ export interface ConfigPatch {
   executeMarginThreshold?: number;
   maxOrderSizeUsdc?: number;
   enableTrading?: boolean;
+  // Gamma API tag slugs (e.g. "sports", "politics") to scan — empty/absent
+  // means no filter (scan every active market, the original behavior).
+  // Fewer markets means fewer WebSocket book-update events competing for
+  // the same single-threaded event loop, which matters for order latency
+  // (see executor.ts — this bot isn't the fastest in the race). Only takes
+  // effect on the next start (connectAndScan rebuilds the market list).
+  allowedTagSlugs?: string[];
 }
 
 export type Command =
@@ -68,6 +75,17 @@ export function validateCommand(type: unknown, payload: unknown): Command {
       if ("enableTrading" in p) {
         if (typeof p.enableTrading !== "boolean") throw new Error("enableTrading must be a boolean");
         patch.enableTrading = p.enableTrading;
+      }
+      if ("allowedTagSlugs" in p) {
+        const v = p.allowedTagSlugs;
+        if (
+          !Array.isArray(v) ||
+          v.length > 30 ||
+          !v.every((slug) => typeof slug === "string" && /^[a-z0-9-]{1,64}$/.test(slug))
+        ) {
+          throw new Error("allowedTagSlugs must be an array of up to 30 lowercase slugs (e.g. \"sports\")");
+        }
+        patch.allowedTagSlugs = v as string[];
       }
       if (Object.keys(patch).length === 0) throw new Error("set_config needs at least one field");
       return { type, payload: patch };

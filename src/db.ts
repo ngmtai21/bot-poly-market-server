@@ -47,7 +47,8 @@ export function openDb(path: string): Db {
       yes_spend REAL NOT NULL,
       no_spend REAL NOT NULL,
       status TEXT NOT NULL,
-      detail TEXT
+      detail TEXT,
+      realized_pnl REAL
     );
 
     CREATE TABLE IF NOT EXISTS positions (
@@ -101,6 +102,12 @@ export function openDb(path: string): Db {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
   `);
+  // CREATE TABLE IF NOT EXISTS never adds columns to a table that already
+  // exists from before this field was introduced — migrate it in by hand.
+  const tradeColumns = db.prepare(`PRAGMA table_info(trades)`).all() as { name: string }[];
+  if (!tradeColumns.some((c) => c.name === "realized_pnl")) {
+    db.exec(`ALTER TABLE trades ADD COLUMN realized_pnl REAL`);
+  }
   return db;
 }
 
@@ -212,6 +219,12 @@ export interface TradeRow {
   noSpend: number;
   status: TradeStatus;
   detail?: unknown;
+  // Actual realized profit/loss in USDC, computed from real fill/unwind
+  // amounts (not the pre-trade margin estimate) — see the bot repo's
+  // executor.ts. null means "unresolved" (a failed unwind leaves an open
+  // one-sided position with no known exit price yet), which the dashboard
+  // must show as "at risk", never silently as zero.
+  realizedPnl: number | null;
 }
 
 // A filled trade also opens/extends a position — both legs held until the
@@ -220,8 +233,8 @@ export interface TradeRow {
 export function recordTrade(db: Db, t: TradeRow): void {
   const ts = now();
   db.prepare(
-    `INSERT INTO trades (ts, condition_id, question, shares, yes_ask, no_ask, margin, yes_spend, no_spend, status, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO trades (ts, condition_id, question, shares, yes_ask, no_ask, margin, yes_spend, no_spend, status, detail, realized_pnl)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     ts,
     t.conditionId,
@@ -233,7 +246,8 @@ export function recordTrade(db: Db, t: TradeRow): void {
     t.yesSpend,
     t.noSpend,
     t.status,
-    t.detail === undefined ? null : JSON.stringify(t.detail)
+    t.detail === undefined ? null : JSON.stringify(t.detail),
+    t.realizedPnl
   );
 
   if (t.status !== "filled") {
@@ -309,13 +323,37 @@ export function summarize(db: Db) {
     )
     .get() as { cost: number; expectedProfit: number };
 
+  // Real P&L, not the pre-trade estimate above: sums actual realized_pnl
+  // (both_failed trades cost nothing so are implicitly 0; partial_unwound
+  // trades carry a real, often negative, number from the unwind fill —
+  // see the bot repo's executor.ts). Excludes partial_unwind_failed on
+  // purpose: those have no known exit price yet (realized_pnl IS NULL) and
+  // must surface as "at risk" instead of being silently counted as $0.
+  const netRealized = db
+    .prepare(`SELECT COALESCE(SUM(realized_pnl), 0) AS pnl FROM trades WHERE realized_pnl IS NOT NULL`)
+    .get() as { pnl: number };
+
+  const atRisk = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(yes_spend + no_spend), 0) AS cost
+       FROM trades WHERE status = 'partial_unwind_failed'`
+    )
+    .get() as { n: number; cost: number };
+
   const openPositions = db
     .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(cost), 0) AS cost, COALESCE(SUM(shares), 0) AS payout FROM positions WHERE redeemed_at IS NULL`)
     .get() as { n: number; cost: number; payout: number };
 
   return {
     opportunities: { ...opp, medianLiquidity, byReason },
-    trades: { byStatus: tradesByStatus, filledCost: filled.cost, filledExpectedProfit: filled.expectedProfit },
+    trades: {
+      byStatus: tradesByStatus,
+      filledCost: filled.cost,
+      filledExpectedProfit: filled.expectedProfit,
+      netRealizedPnl: netRealized.pnl,
+      atRiskCount: atRisk.n,
+      atRiskCost: atRisk.cost,
+    },
     // payout = shares, since exactly one leg of each pair pays $1/share
     openPositions: { count: openPositions.n, lockedCapital: openPositions.cost, expectedPayout: openPositions.payout },
   };
