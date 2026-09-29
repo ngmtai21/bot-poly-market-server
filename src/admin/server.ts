@@ -67,7 +67,6 @@ function randomBytes32Hex(): string {
 
 const db = openDb(DB_PATH);
 const HEARTBEAT_STALE_MS = 15_000;
-const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 interface AuthedRequest extends IncomingMessage {
   session?: SessionPayload;
@@ -222,6 +221,9 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       const age = status ? Date.now() - Date.parse(String(status.heartbeat)) : null;
       return send(res, 200, { status, heartbeatAgeMs: age, online: age !== null && age < HEARTBEAT_STALE_MS });
     }
+    // Written by the bot on each start (see ../bot/src/scan.ts), [] while stopped.
+    case "GET /api/markets/scanned":
+      return send(res, 200, getKv(db, "scannedMarkets") ?? []);
     case "GET /api/summary":
       return send(res, 200, summarize(db));
     case "GET /api/opportunities": {
@@ -342,51 +344,6 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       ip: clientIp(req),
     });
     return send(res, 200, { ok: true });
-  }
-
-  // ---- Contract-address config (view: any role, edit: admin only) ----
-  if (route === "GET /api/config/addresses") {
-    return send(
-      res,
-      200,
-      getKv(db, "contractAddresses") ?? {
-        ctfAdapterAddress: "",
-        negRiskCtfAdapterAddress: "",
-        collateralTokenAddress: "",
-      }
-    );
-  }
-  // The bot publishes these on every boot (see ../bot/src/scan.ts) — single
-  // source of truth for the verified defaults stays there, this just reads
-  // them. Powers the "Reset to default" button; an empty object means the
-  // bot hasn't booted since this feature shipped (older version).
-  if (route === "GET /api/config/addresses/default") {
-    return send(res, 200, getKv(db, "defaultContractAddresses") ?? {});
-  }
-  if (route === "PUT /api/config/addresses") {
-    if (!requireAdmin()) return send(res, 403, { error: "admin role required" });
-    let body: Record<string, unknown>;
-    try {
-      body = (await readJson(req)) as Record<string, unknown>;
-    } catch {
-      return send(res, 400, { error: "invalid JSON body" });
-    }
-    const fields = ["ctfAdapterAddress", "negRiskCtfAdapterAddress", "collateralTokenAddress"] as const;
-    const out: Record<string, string> = {};
-    for (const f of fields) {
-      const v = body[f];
-      if (v === undefined || v === "") {
-        out[f] = "";
-        continue;
-      }
-      if (typeof v !== "string" || !HEX_ADDRESS.test(v)) {
-        return send(res, 400, { error: `${f} must be a 0x-prefixed 20-byte hex address` });
-      }
-      out[f] = v;
-    }
-    setKv(db, "contractAddresses", out);
-    recordAudit(db, { username: session.username, action: "update_contract_addresses", detail: out, ip: clientIp(req) });
-    return send(res, 200, out);
   }
 
   // ---- Wallet key rotation (admin only) ----

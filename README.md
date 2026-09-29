@@ -123,8 +123,8 @@ Endpoints (all under `/api/`, all but login require `Authorization: Bearer
   account management (admin role only; can't delete the last admin or
   yourself).
 - `POST auth/change-password` — any logged-in user, own account.
-- `GET/PUT config/addresses` — the redeem contract addresses (view: any
-  role, edit: admin only).
+- `GET markets/scanned` — the markets the bot is currently scanning
+  (after its tag/time filters; `[]` while stopped).
 - `GET wallet/rotation-status`, `POST wallet/stage-key` — see the bot
   repo's README, "Entering the wallet key from the admin panel".
 
