@@ -15,6 +15,12 @@ export interface ConfigPatch {
   // (see executor.ts — this bot isn't the fastest in the race). Only takes
   // effect on the next start (connectAndScan rebuilds the market list).
   allowedTagSlugs?: string[];
+  // Restrict scanning to markets resolving within this many hours (0/absent
+  // = no filter). For testing the full pipeline — detect, trade,
+  // auto-redeem — against markets that will actually resolve soon, instead
+  // of waiting on whatever the bot happens to trade normally. See
+  // markets.ts for the "endDate isn't a resolution guarantee" caveat.
+  maxHoursToResolution?: number;
 }
 
 export type Command =
@@ -86,6 +92,13 @@ export function validateCommand(type: unknown, payload: unknown): Command {
           throw new Error("allowedTagSlugs must be an array of up to 30 lowercase slugs (e.g. \"sports\")");
         }
         patch.allowedTagSlugs = v as string[];
+      }
+      if ("maxHoursToResolution" in p) {
+        const v = p.maxHoursToResolution;
+        if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 24 * 365) {
+          throw new Error("maxHoursToResolution must be a number in [0, 8760] (0 = no filter)");
+        }
+        patch.maxHoursToResolution = v;
       }
       if (Object.keys(patch).length === 0) throw new Error("set_config needs at least one field");
       return { type, payload: patch };
