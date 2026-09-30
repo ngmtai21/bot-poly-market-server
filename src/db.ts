@@ -101,6 +101,23 @@ export function openDb(path: string): Db {
       ip TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+
+    -- Debug timings, written by the bot only (the admin doesn't read it yet):
+    -- kind 'order' = one row per real execution attempt; kind 'rtt' = one row
+    -- per few minutes of keep-warm ping + Node event-loop stats.
+    CREATE TABLE IF NOT EXISTS latency (
+      id INTEGER PRIMARY KEY,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      condition_id TEXT,
+      detect_ms REAL,
+      yes_ms REAL,
+      no_ms REAL,
+      rtt_ms REAL,
+      loop_p99_ms REAL,
+      detail TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_latency_ts ON latency(ts);
   `);
   // CREATE TABLE IF NOT EXISTS never adds columns to a table that already
   // exists from before this field was introduced — migrate it in by hand.
