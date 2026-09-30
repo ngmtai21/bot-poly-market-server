@@ -31,7 +31,9 @@ export function openDb(path: string): Db {
       expected_profit REAL NOT NULL,
       liquidity REAL,
       volume REAL,
-      reason TEXT NOT NULL
+      reason TEXT NOT NULL,
+      yes_depth REAL,
+      no_depth REAL
     );
     CREATE INDEX IF NOT EXISTS idx_opp_ts ON opportunities(ts);
 
@@ -124,6 +126,10 @@ export function openDb(path: string): Db {
   const tradeColumns = db.prepare(`PRAGMA table_info(trades)`).all() as { name: string }[];
   if (!tradeColumns.some((c) => c.name === "realized_pnl")) {
     db.exec(`ALTER TABLE trades ADD COLUMN realized_pnl REAL`);
+  }
+  const oppColumns = db.prepare(`PRAGMA table_info(opportunities)`).all() as { name: string }[];
+  if (!oppColumns.some((c) => c.name === "yes_depth")) {
+    db.exec(`ALTER TABLE opportunities ADD COLUMN yes_depth REAL; ALTER TABLE opportunities ADD COLUMN no_depth REAL`);
   }
   return db;
 }
