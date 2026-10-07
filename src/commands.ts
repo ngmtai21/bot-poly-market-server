@@ -21,6 +21,9 @@ export interface ConfigPatch {
   // of waiting on whatever the bot happens to trade normally. See
   // markets.ts for the "endDate isn't a resolution guarantee" caveat.
   maxHoursToResolution?: number;
+  // Skip markets whose scheduled end is closer than this (0 = no filter) —
+  // books in the last minutes are thin and move faster than a FOK can land.
+  minMinutesToResolution?: number;
 }
 
 export type Command =
@@ -99,6 +102,13 @@ export function validateCommand(type: unknown, payload: unknown): Command {
           throw new Error("maxHoursToResolution must be a number in [0, 8760] (0 = no filter)");
         }
         patch.maxHoursToResolution = v;
+      }
+      if ("minMinutesToResolution" in p) {
+        const v = p.minMinutesToResolution;
+        if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 24 * 60) {
+          throw new Error("minMinutesToResolution must be a number in [0, 1440] (0 = no filter)");
+        }
+        patch.minMinutesToResolution = v;
       }
       if (Object.keys(patch).length === 0) throw new Error("set_config needs at least one field");
       return { type, payload: patch };
