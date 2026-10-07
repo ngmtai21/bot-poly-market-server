@@ -1,12 +1,14 @@
 type Level = "info" | "warn" | "error";
 
 // Vietnam is a fixed UTC+7 with no DST, so shift by a constant instead of
-// pulling in Intl/timezone handling. Log lines only; DB timestamps stay UTC.
+// pulling in Intl/timezone handling. Every timestamp this project writes
+// (logs, DB rows, heartbeat) goes through this, so they all read as VN time.
+// Date.parse() understands the +07:00 suffix, so comparisons stay correct.
 const VN_OFFSET_MS = 7 * 3_600_000;
-const stamp = () => new Date(Date.now() + VN_OFFSET_MS).toISOString().replace("Z", "+07:00");
+export const vnIso = (ms = Date.now()): string => new Date(ms + VN_OFFSET_MS).toISOString().replace("Z", "+07:00");
 
 function log(level: Level, msg: string, meta?: unknown): void {
-  const line = `${stamp()} [${level.toUpperCase()}] ${msg}`;
+  const line = `${vnIso()} [${level.toUpperCase()}] ${msg}`;
   const out = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
   if (meta === undefined) out(line);
   else out(line, meta);

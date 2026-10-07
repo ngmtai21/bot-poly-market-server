@@ -2,6 +2,7 @@ import { config as loadDotenv } from "dotenv";
 import { existsSync, mkdirSync, copyFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 import { DEFAULT_DB_PATH, openDb } from "../db.js";
+import { vnIso } from "../logger.js";
 
 loadDotenv({ path: ".env", quiet: true }); // DB_PATH/BACKUP_* live in the admin env
 
@@ -26,7 +27,7 @@ function main() {
   db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
   db.close();
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const stamp = vnIso().slice(0, 19).replace(/[:T]/g, "-");
   const dest = join(backupDir, `${basename(dbPath)}.${stamp}.bak`);
   copyFileSync(dbPath, dest);
   console.log(`Backed up ${dbPath} -> ${dest}`);

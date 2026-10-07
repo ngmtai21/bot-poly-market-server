@@ -20,6 +20,7 @@ import {
 import { validateCommand } from "../commands.js";
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken, type Role, type SessionPayload } from "../auth.js";
 import { sendAlert } from "../alerts.js";
+import { vnIso } from "../logger.js";
 
 // Pure JSON API (no static file serving — the admin-page UI is a separate
 // project that calls this API over HTTP, from its own origin), as a
@@ -380,7 +381,7 @@ async function handleApi(req: AuthedRequest, res: ServerResponse, url: URL): Pro
       Buffer.from(body.privateKey, "utf8")
     ).toString("base64");
     body.privateKey = "";
-    setKv(db, "stagedWalletKey", { ciphertext, stagedAt: new Date().toISOString() });
+    setKv(db, "stagedWalletKey", { ciphertext, stagedAt: vnIso() });
     recordAudit(db, { username: session.username, action: "stage_wallet_key", ip: clientIp(req) });
     void sendAlert(`🔐 Wallet key rotation staged by <b>${session.username}</b> — restart the bot to apply.`);
     return send(res, 200, { ok: true, note: "Staged — restart the bot process (npm run scan) to apply it." });

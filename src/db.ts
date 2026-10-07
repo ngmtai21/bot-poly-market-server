@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { sendAlert } from "./alerts.js";
+import { vnIso } from "./logger.js";
 
 // Shared by the bot process (writer) and the admin API process (reader +
 // command writer). Must never import config.ts or anything touching
@@ -193,7 +194,7 @@ export function updateUserPassword(db: Db, id: number, passwordHash: string): vo
   db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(passwordHash, id);
 }
 
-const now = () => new Date().toISOString();
+const now = () => vnIso();
 
 export type OpportunityReason = "dry-run" | "paused" | "below-execute-threshold" | "unsizeable" | "executed";
 
