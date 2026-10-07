@@ -26,6 +26,13 @@ function main() {
     `Mode: ${status.enableTrading ? "LIVE" : "DRY-RUN"}${status.paused ? " (PAUSED)" : ""} | markets: ${status.marketsLoaded} | WS: ${status.wsConnected ? "connected" : "down"} | book updates: ${status.bookUpdates}`
   );
 
+  const best = status.bestNet as { margin: number; question: string; yesAsk: number; noAsk: number; at: string } | null | undefined;
+  if (best) {
+    console.log(
+      `Best net margin seen since start: ${(best.margin * 100).toFixed(2)}% (YES ${best.yesAsk} + NO ${best.noAsk}) — ${best.question} @ ${best.at}`
+    );
+  }
+
   const last = db.prepare(`SELECT ts, question, margin, reason FROM opportunities ORDER BY id DESC LIMIT 1`).get() as
     | { ts: string; question: string; margin: number; reason: string }
     | undefined;
